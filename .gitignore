@@ -1,0 +1,32 @@
+**/bin/
+**/obj/
+**/TestResults/
+.vs/
+.idea/
+artifacts/
+logs/
+**/appsettings.Local.json
+*.user
+*.suo
+**/remote-config.local.json
+**/data/device-commands/
+**/.office-mcp/
+*.log
+
+# 本机 HTTP 客户端环境、凭据和证书私钥。
+**/http-client.private.env.json
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.pfx
+*.p12
+
+# 企业用户资料和实际部署记录仅保留在本地。
+/src/OfficeMcp.Api/用户列表.txt
+/docs/server-migration-20260916.md
+/docs/timer-investigation-20260916.md
+/docs/verification.md
+**/*.local.md

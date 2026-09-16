@@ -1,0 +1,70 @@
+# 与 OpenAPI 示例二选一；合并到已有 office_common_tools，不要重复注册后端。
+# 手工描述 HTTP 工具，无需网关启动时获取文档。
+services:
+  - name: office_common_tools
+    title: 办公服务 · 考勤
+    instructions: 此连接提供考勤查询、主动打卡和任务状态查询。仅在用户明确要求打卡时调用 attendance_clock_in；未完成时用 attendance_clock_in_status 查询同一任务，只有 attendance_confirmed=true 才确认有记录。
+    type: http
+    base_url: http://127.0.0.1:18101
+    headers:
+      X-Api-Key: "${OFFICE_API_KEY}"
+    timeout_seconds: 150
+    tools:
+      - name: attendance_query
+        description: 一次查询固定用户日期范围内的全部考勤，包含首尾日期，默认最多31天。返回按日期升序排列的数组，每日包含脱敏用户、打卡记录和success；失败日期有error，其他日期仍返回。单日查询传相同日期。时间为北京时间，成功但无记录不代表旷工或休息。
+        method: GET
+        path: /api/attendance
+        read_only: true
+        parameters:
+          - name: start_date
+            in: query
+            required: true
+            description: 起始工作日，包含当天，格式为 yyyy-MM-dd。
+            schema:
+              type: string
+              format: date
+              pattern: '^\d{4}-\d{2}-\d{2}$'
+          - name: end_date
+            in: query
+            required: true
+            description: 结束工作日，包含当天，格式为 yyyy-MM-dd，不能早于起始日期。
+            schema:
+              type: string
+              format: date
+              pattern: '^\d{4}-\d{2}-\d{2}$'
+      - name: attendance_clock_in
+        description: 仅在用户明确要求实际打卡时调用。请求手机现在亮屏拉起钉钉并由服务端核验。上班已有记录不重复，下班允许更新。request_id使用UUID且重试复用；只有attendance_confirmed为true才确认有记录。未完成时使用返回task_id查询状态，不重复新建任务。
+        method: POST
+        path: /api/attendance/clock-in
+        read_only: false
+        body_schema:
+          type: object
+          required: [request_id, check_type]
+          properties:
+            request_id:
+              type: string
+              format: uuid
+              description: 新操作用新UUID；同一操作重试复用原UUID。
+            check_type:
+              type: string
+              enum: [OnDuty, OffDuty]
+              description: 核验上班或下班，实际动作依赖手机的钉钉自动打卡设置。
+            work_date:
+              type: string
+              format: date
+              description: 默认北京时间今天；前一天仅支持明确的跨午夜下班排班。
+            wait_seconds:
+              type: integer
+              minimum: 0
+              maximum: 60
+              default: 45
+      - name: attendance_clock_in_status
+        description: 查询已创建的远程打卡任务，不下发新的手机动作。以attendance_confirmed判断记录是否已确认。
+        method: GET
+        path: /api/attendance/clock-in/{task_id}
+        read_only: true
+        parameters:
+          - name: task_id
+            in: path
+            required: true
+            schema: {type: string}

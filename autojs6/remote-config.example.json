@@ -1,0 +1,7 @@
+{
+  "base_url": "http://192.0.2.10:18101",
+  "device_id": "office-phone",
+  "device_key": "",
+  "keep_screen_on_seconds": 15,
+  "open_app_delay_ms": 800
+}

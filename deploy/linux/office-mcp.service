@@ -1,0 +1,29 @@
+[Unit]
+Description=Office MCP attendance backend
+After=network-online.target zerotier-one.service
+Wants=network-online.target zerotier-one.service
+
+[Service]
+Type=simple
+User=office-mcp
+Group=office-mcp
+WorkingDirectory=/opt/office-mcp
+ExecStart=/opt/office-mcp/OfficeMcp.Api
+# 网络地址就绪前启动失败时自动重试；正常停机等待任务状态落盘。
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+Environment=ASPNETCORE_ENVIRONMENT=Production
+Environment=TZ=Asia/Shanghai
+Environment=DOTNET_NOLOGO=true
+SyslogIdentifier=office-mcp
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+# 应用和配置只读，仅允许任务持久化目录写入。
+ReadWritePaths=/opt/office-mcp/data
+
+[Install]
+WantedBy=multi-user.target

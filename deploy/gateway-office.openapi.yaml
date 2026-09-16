@@ -1,0 +1,15 @@
+# 将此项合并到 mcp-gateway/config/gateway.yaml 已有的 office_common_tools，不要重复添加后端。
+# 网关凭据文件增加 OFFICE_API_KEY，其值与本服务 Authentication:ApiKey 一致。
+# 首次加载需要办公服务在线，之后网关可以使用已有的 OpenAPI 缓存。
+services:
+  - name: office_common_tools
+    title: 办公服务 · 考勤
+    instructions: 此连接提供考勤查询、主动打卡和任务状态查询。仅在用户明确要求打卡时调用 attendance_clock_in；未完成时用 attendance_clock_in_status 查询同一任务，只有 attendance_confirmed=true 才确认有记录。
+    type: openapi
+    base_url: http://127.0.0.1:18101
+    spec_url: http://127.0.0.1:18101/openapi/v1.json
+    headers:
+      X-Api-Key: "${OFFICE_API_KEY}"
+    timeout_seconds: 150
+    methods: [GET, POST]
+    include_operations: [attendance_query, attendance_clock_in, attendance_clock_in_status]

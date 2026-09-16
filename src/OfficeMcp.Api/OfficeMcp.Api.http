@@ -1,0 +1,17 @@
+@baseUrl = http://127.0.0.1:18101
+# 在 HTTP 客户端本地私密环境中设置 apiKey，不要把真实值写入此文件。
+// 从已忽略的 http-client.private.env.json 的 local 环境读取 officeApiKey。
+
+GET {{baseUrl}}/healthz
+
+### 一次查询日期范围内全部上下班考勤结果，包含首尾日期
+GET {{baseUrl}}/api/attendance?start_date=2026-09-01&end_date=2026-09-14
+X-Api-Key: {{officeApiKey}}
+
+### 单日查询使用相同的起止日期
+GET {{baseUrl}}/api/attendance?start_date=2026-09-10&end_date=2026-09-10
+X-Api-Key: {{officeApiKey}}
+
+### 提供给网关的 OpenAPI 文档
+GET {{baseUrl}}/openapi/v1.json
+X-Api-Key: {{officeApiKey}}
