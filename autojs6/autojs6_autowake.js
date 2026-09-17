@@ -28,19 +28,19 @@ var CONFIG = {
     // 启用打开 APP 时，在启动请求处理完毕后继续保亮这些秒数。
     keepScreenOnSeconds: 15,
 
-    // 正式上午执行窗口，不支持跨午夜；预留 5 分钟后随机登记范围为 08:35～08:50。
-    // 系统延迟时，发起设备动作仍不得超过 08:55 的窗口截止时间。
-    randomStart: "08:35:00",
-    randomEnd: "08:55:00",
+    // 正式上午执行窗口，不支持跨午夜；随机登记上界为 randomEnd 减去配置的延迟余量。
+    // 系统延迟时，发起设备动作仍不得超过 randomEnd 的窗口截止时间。
+    randomStart: "08:45:00",
+    randomEnd: "08:58:00",
 
     // 实际开始规划时，距离窗口开始至少还剩多少秒。
     // 允许 10～3600 秒，不是必须提前 20 分钟。
     minPlanningLeadSeconds: 10,
 
-    // 在窗口尾部预留的调度延迟余量；300 秒即 5 分钟，允许 1～3600 秒。
+    // 在窗口尾部预留的调度延迟余量，单位为秒，允许 1～3600 的整数。
     // 随机登记范围为 [randomStart, randomEnd - 此余量]，窗口长度不能小于余量。
     // 被系统延迟后允许执行到 randomEnd，不再使用抽中时刻后的 30 秒限制。
-    delayBufferSeconds: 300,
+    delayBufferSeconds: 180,
 
     // true：亮屏后请求打开 APP；false：只亮屏。
     openAppAfterWake: true,
