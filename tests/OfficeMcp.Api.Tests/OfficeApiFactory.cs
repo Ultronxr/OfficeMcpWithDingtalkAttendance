@@ -82,8 +82,13 @@ internal sealed class FakeDingTalkHandler : HttpMessageHandler
     public ConcurrentQueue<string> Bodies { get; } = new();
     public ConcurrentQueue<string> Queries { get; } = new();
     public Func<int, string> AttendanceResponse { get; set; } = _ => """
-        {"errcode":0,"result":{"userid":"test-user-000001","attendance_result_list":[]}}
+        {"errcode":0,"recordresult":[]}
         """;
+    public ConcurrentQueue<(string Path, string Body)> DirectoryRequests { get; } = new();
+    public Func<string, string, string> DirectoryResponse { get; set; } = (path, _) =>
+        path.EndsWith("/listsub", StringComparison.Ordinal)
+            ? """{"errcode":0,"result":[]}"""
+            : """{"errcode":0,"result":{"has_more":false,"list":[]}}""";
     public string? TokenResponseOverride { get; set; }
     public HttpStatusCode ResponseStatus { get; set; } = HttpStatusCode.OK;
     public bool SimulateTimeout { get; set; }
@@ -101,7 +106,15 @@ internal sealed class FakeDingTalkHandler : HttpMessageHandler
             return Json(TokenResponseOverride ?? $$"""{"accessToken":"test-token-{{number}}","expireIn":7200}""");
         }
         Assert.Equal("oapi.dingtalk.com", request.RequestUri.Host);
-        Assert.Equal("/topapi/attendance/getupdatedata", request.RequestUri.AbsolutePath);
+        if (request.RequestUri.AbsolutePath.StartsWith("/topapi/v2/", StringComparison.Ordinal))
+        {
+            var directoryBody = await request.Content!.ReadAsStringAsync(cancellationToken);
+            DirectoryRequests.Enqueue((request.RequestUri.AbsolutePath, directoryBody));
+            return Json(DirectoryResponse(request.RequestUri.AbsolutePath, directoryBody));
+        }
+        if (request.RequestUri.AbsolutePath == "/topapi/attendance/getupdatedata")
+            return Json("""{"errcode":0,"result":{"userid":"test-user-000001","attendance_result_list":[]}}""");
+        Assert.Equal("/attendance/listRecord", request.RequestUri.AbsolutePath);
         Assert.Equal(HttpMethod.Post, request.Method);
         var count = Interlocked.Increment(ref _attendanceCalls);
         var body = await request.Content!.ReadAsStringAsync(cancellationToken);

@@ -4,12 +4,24 @@
 
 GET {{baseUrl}}/healthz
 
-### 一次查询日期范围内全部上下班考勤结果，包含首尾日期
+### 查询默认员工的打卡明细，包含首尾日期，内部按七天分段
 GET {{baseUrl}}/api/attendance?start_date=2026-09-01&end_date=2026-09-14
 X-Api-Key: {{officeApiKey}}
 
 ### 单日查询使用相同的起止日期
 GET {{baseUrl}}/api/attendance?start_date=2026-09-10&end_date=2026-09-10
+X-Api-Key: {{officeApiKey}}
+
+### 获取应用可见员工列表，可追加 user_name 按姓名包含筛选
+GET {{baseUrl}}/api/employees
+X-Api-Key: {{officeApiKey}}
+
+### 按完整员工 ID 查询详细信息（ID 为合成示例，请替换为员工列表中的值）
+GET {{baseUrl}}/api/attendance?start_date=2026-09-01&end_date=2026-09-14&user_id=test-user-000001&detail=full
+X-Api-Key: {{officeApiKey}}
+
+### 按姓名精确查询，重名返回候选 ID；不能同时传 user_id
+GET {{baseUrl}}/api/attendance?start_date=2026-09-10&end_date=2026-09-10&user_name=张三
 X-Api-Key: {{officeApiKey}}
 
 ### 提供给网关的 OpenAPI 文档

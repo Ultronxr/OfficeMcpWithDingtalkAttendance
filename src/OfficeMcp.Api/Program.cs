@@ -1,6 +1,7 @@
 using OfficeMcp.Api.Features.Attendance;
 using OfficeMcp.Api.Infrastructure;
 using OfficeMcp.Api.Features.DeviceCommands;
+using OfficeMcp.Api.Features.Employees;
 
 /// <summary>通用办公 HTTP 服务入口；NSSM 可直接托管发布后的可执行文件。</summary>
 public partial class Program
@@ -21,6 +22,7 @@ public partial class Program
         builder.Logging.AddJsonConsole();
         builder.Services.AddOfficeInfrastructure(builder.Configuration);
         builder.Services.AddAttendanceFeature(builder.Configuration);
+        builder.Services.AddEmployeeFeature();
         builder.Services.AddRemoteCommands(builder.Configuration);
 
         var app = builder.Build();
@@ -35,7 +37,7 @@ public partial class Program
         });
         app.MapHealthChecks("/healthz").AllowAnonymous();
         app.MapOfficeOpenApi();
-        app.MapGroup("/api").RequireAuthorization().MapAttendanceEndpoints().MapClockInEndpoints();
+        app.MapGroup("/api").RequireAuthorization().MapAttendanceEndpoints().MapClockInEndpoints().MapEmployeeEndpoints();
         app.MapDeviceCommands();
         app.Run();
     }

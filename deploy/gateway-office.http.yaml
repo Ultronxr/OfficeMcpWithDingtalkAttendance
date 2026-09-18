@@ -3,7 +3,7 @@
 services:
   - name: office_common_tools
     title: 办公服务 · 考勤
-    instructions: 此连接提供考勤查询、主动打卡和任务状态查询。仅在用户明确要求打卡时调用 attendance_clock_in；未完成时用 attendance_clock_in_status 查询同一任务，只有 attendance_confirmed=true 才确认有记录。
+    instructions: 此连接提供员工列表、动态员工考勤查询、主动打卡和任务状态查询。可先用 employee_list 获取员工ID，再用 attendance_query 查询；姓名重名时根据候选ID选择，勿猜选。主动打卡仍使用配置的固定员工。仅在用户明确要求打卡时调用 attendance_clock_in；未完成时用 attendance_clock_in_status 查询同一任务，只有 attendance_confirmed=true 才确认有记录。
     type: http
     base_url: http://127.0.0.1:18101
     headers:
@@ -11,7 +11,7 @@ services:
     timeout_seconds: 150
     tools:
       - name: attendance_query
-        description: 一次查询固定用户日期范围内的全部考勤，包含首尾日期，默认最多31天。返回按日期升序排列的数组，每日包含脱敏用户、打卡记录和success；失败日期有error，其他日期仍返回。单日查询传相同日期。时间为北京时间，成功但无记录不代表旷工或休息。
+        description: 查询员工日期范围内的打卡明细，包含首尾日期，默认最多31天，内部按最多7天分段。user_id与user_name二选一，省略时使用默认员工，姓名精确匹配且重名返回候选。detail默认simple，full附上完整上游明细。返回按工作日升序的数组，摘要用户ID脱敏；失败段的日期有error，其他段仍返回。摘要时间为北京时间，成功但无记录不代表旷工或休息。
         method: GET
         path: /api/attendance
         read_only: true
@@ -32,6 +32,35 @@ services:
               type: string
               format: date
               pattern: '^\d{4}-\d{2}-\d{2}$'
+          - name: user_id
+            in: query
+            required: false
+            description: 完整钉钉员工ID，可通过employee_list获取，与user_name互斥。
+            schema: {type: string}
+          - name: user_name
+            in: query
+            required: false
+            description: 员工姓名，去除首尾空白后精确匹配，与user_id互斥；重名时返回候选ID。
+            schema: {type: string}
+          - name: detail
+            in: query
+            required: false
+            description: simple返回摘要，full在各条records的details中附上完整原始字段，包括实际返回的地址、坐标、设备和Wi-Fi等。
+            schema:
+              type: string
+              enum: [simple, full]
+              default: simple
+      - name: employee_list
+        description: 获取应用可见全部部门及子部门的员工，自动处理分页并按user_id去重。返回完整员工ID、姓名和可见所属部门；支持姓名包含筛选，缓存五分钟。员工ID可用于attendance_query。
+        method: GET
+        path: /api/employees
+        read_only: true
+        parameters:
+          - name: user_name
+            in: query
+            required: false
+            description: 可选姓名包含筛选；考勤查询中的user_name使用精确匹配。
+            schema: {type: string}
       - name: attendance_clock_in
         description: 仅在用户明确要求实际打卡时调用。请求手机现在亮屏拉起钉钉并由服务端核验。上班已有记录不重复，下班允许更新。request_id使用UUID且重试复用；只有attendance_confirmed为true才确认有记录。未完成时使用返回task_id查询状态，不重复新建任务。
         method: POST

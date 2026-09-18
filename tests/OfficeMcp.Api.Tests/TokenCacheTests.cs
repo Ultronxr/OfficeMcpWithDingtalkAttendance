@@ -32,7 +32,7 @@ public sealed class TokenCacheTests
         await using var factory = new OfficeApiFactory();
         factory.Handler.AttendanceResponse = count => alwaysReject || count == 1
             ? "{\"errcode\":42001}"
-            : "{\"errcode\":0,\"result\":{\"attendance_result_list\":[]}}";
+            : "{\"errcode\":0,\"recordresult\":[]}";
         using var client = factory.AuthenticatedClient();
         var response = await client.GetAsync("/api/attendance?start_date=2026-09-10&end_date=2026-09-10");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);

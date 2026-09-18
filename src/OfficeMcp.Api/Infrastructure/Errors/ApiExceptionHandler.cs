@@ -31,6 +31,7 @@ public sealed class ApiExceptionHandler(ILogger<ApiExceptionHandler> logger) : I
             Extensions = { ["code"] = code, ["traceId"] = context.TraceIdentifier }
         };
         if (upstream?.ProviderCode is not null) problem.Extensions["providerCode"] = upstream.ProviderCode;
+        if (requestError?.Details is not null) problem.Extensions["details"] = requestError.Details;
         await context.Response.WriteAsJsonAsync(problem, options: null, contentType: "application/problem+json",
             cancellationToken: cancellationToken);
         return true;

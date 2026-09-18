@@ -13,7 +13,7 @@ public sealed class AttendanceApiTests
         await using var factory = new OfficeApiFactory();
         using var client = factory.CreateClient();
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/healthz")).StatusCode);
-        foreach (var path in new[] { "/api/attendance?start_date=2026-09-10&end_date=2026-09-10", "/openapi/v1.json" })
+        foreach (var path in new[] { "/api/attendance?start_date=2026-09-10&end_date=2026-09-10", "/openapi/v1.json", "/api/employees" })
             Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync(path)).StatusCode);
         client.DefaultRequestHeaders.Add("X-Api-Key", "wrong-key");
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/attendance?start_date=2026-09-10&end_date=2026-09-10")).StatusCode);
@@ -50,15 +50,15 @@ public sealed class AttendanceApiTests
         await using var factory = new OfficeApiFactory();
         var epoch = new DateTimeOffset(2026, 9, 10, 9, 0, 0, TimeSpan.FromHours(8)).ToUnixTimeMilliseconds();
         factory.Handler.AttendanceResponse = _ => $$$"""
-        {"errcode":0,"result":{"userid":"test-user-000001","attendance_result_list":[
-          {"check_type":"OffDuty","plan_check_time":"2026-09-11 01:00:00","user_check_time":"2026-09-11 01:01:00","time_result":"Normal","user_address":"PRIVATE-ADDRESS"},
-          {"check_type":"OnDuty","plan_check_time":"{{{epoch}}}","user_check_time":{{{epoch}}},"time_result":"Late"},
-          {"check_type":"OffDuty","plan_check_time":"2026-09-10 12:00:00","user_check_time":0,"time_result":"NotSigned"},
-          {"check_type":"OnDuty","plan_check_time":"2026-09-10 13:00:00","user_check_time":null,"time_result":"NewProviderState"}
-        ],"approve_list":[{"tag_name":"PRIVATE-APPROVAL"}]}}
+        {"errcode":0,"recordresult":[
+          {"userId":"test-user-000001","workDate":"2026-09-10 00:00:00","checkType":"OffDuty","planCheckTime":"2026-09-11 01:00:00","userCheckTime":"2026-09-11 01:01:00","timeResult":"Normal","userAddress":"PRIVATE-ADDRESS"},
+          {"userId":"test-user-000001","workDate":"2026-09-10 00:00:00","checkType":"OnDuty","planCheckTime":"{{{epoch}}}","userCheckTime":{{{epoch}}},"timeResult":"Late"},
+          {"userId":"test-user-000001","workDate":"2026-09-10 00:00:00","checkType":"OffDuty","planCheckTime":"2026-09-10 12:00:00","userCheckTime":0,"timeResult":"NotSigned"},
+          {"userId":"test-user-000001","workDate":"2026-09-10 00:00:00","checkType":"OnDuty","planCheckTime":"2026-09-10 13:00:00","userCheckTime":null,"timeResult":"NewProviderState"}
+        ]}
         """;
         using var client = factory.AuthenticatedClient();
-        var response = await client.GetAsync("/api/attendance?start_date=2026-09-10&end_date=2026-09-10&userid=someone-else");
+        var response = await client.GetAsync("/api/attendance?start_date=2026-09-10&end_date=2026-09-10");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal("no-store", response.Headers.CacheControl!.ToString());
         var body = await response.Content.ReadAsStringAsync();
@@ -79,8 +79,8 @@ public sealed class AttendanceApiTests
         Assert.Equal("2026-09-11T01:01:00+08:00", records[3].GetProperty("actual_check_time").GetString());
         Assert.DoesNotContain("PRIVATE", body);
         using var sent = JsonDocument.Parse(Assert.Single(factory.Handler.Bodies));
-        Assert.Equal(OfficeApiFactory.UserId, sent.RootElement.GetProperty("userid").GetString());
-        Assert.Equal("2026-09-10 00:00:00", sent.RootElement.GetProperty("work_date").GetString());
+        Assert.Equal(OfficeApiFactory.UserId, sent.RootElement.GetProperty("userIds")[0].GetString());
+        Assert.Equal("2026-09-10 00:00:00", sent.RootElement.GetProperty("checkDateFrom").GetString());
     }
 
     /// <summary>上游无数据时返回空列表，不推断休息或旷工。</summary>
@@ -104,8 +104,8 @@ public sealed class AttendanceApiTests
     [InlineData("{\"result\":{}}", "dingtalk_invalid_response")]
     [InlineData("{\"errcode\":0}", "dingtalk_invalid_response")]
     [InlineData("not-json", "dingtalk_invalid_response")]
-    [InlineData("{\"errcode\":0,\"result\":{\"userid\":\"another-user\"}}", "dingtalk_user_mismatch")]
-    [InlineData("{\"errcode\":0,\"result\":{\"attendance_result_list\":[{\"plan_check_time\":\"invalid-time\"}]}}", "dingtalk_invalid_response")]
+    [InlineData("{\"errcode\":0,\"recordresult\":[{\"userId\":\"another-user\",\"workDate\":\"2026-09-10 00:00:00\"}]}", "dingtalk_user_mismatch")]
+    [InlineData("{\"errcode\":0,\"recordresult\":[{\"planCheckTime\":\"invalid-time\"}]}", "dingtalk_invalid_response")]
     public async Task UpstreamFailuresAreSafeErrors(string payload, string expectedCode)
     {
         await using var factory = new OfficeApiFactory();
@@ -150,12 +150,16 @@ public sealed class AttendanceApiTests
         var operation = root.GetProperty("paths").GetProperty("/api/attendance").GetProperty("get");
         Assert.Equal("attendance_query", operation.GetProperty("operationId").GetString());
         var parameters = operation.GetProperty("parameters").EnumerateArray().ToArray();
-        Assert.Equal(new[] { "start_date", "end_date" }, parameters.Select(x => x.GetProperty("name").GetString()));
-        Assert.All(parameters, parameter =>
+        Assert.Equal(new[] { "start_date", "end_date", "user_id", "user_name", "detail" }, parameters.Select(x => x.GetProperty("name").GetString()));
+        Assert.All(parameters.Take(2), parameter =>
         {
             Assert.True(parameter.GetProperty("required").GetBoolean());
             Assert.Equal("date", parameter.GetProperty("schema").GetProperty("format").GetString());
         });
+        var detailSchema = parameters.Single(x => x.GetProperty("name").GetString() == "detail").GetProperty("schema");
+        Assert.Equal("simple", detailSchema.GetProperty("default").GetString());
+        Assert.Equal(new[] { "simple", "full" }, detailSchema.GetProperty("enum").EnumerateArray().Select(x => x.GetString()));
+        Assert.Equal("employee_list", root.GetProperty("paths").GetProperty("/api/employees").GetProperty("get").GetProperty("operationId").GetString());
         var responseSchema = operation.GetProperty("responses").GetProperty("200").GetProperty("content")
             .GetProperty("application/json").GetProperty("schema");
         Assert.Equal("array", responseSchema.GetProperty("type").GetString());
