@@ -3,7 +3,7 @@
 services:
   - name: office_common_tools
     title: 办公服务 · 考勤
-    instructions: 此连接提供员工列表、动态员工考勤查询、主动打卡和任务状态查询。可先用 employee_list 获取员工ID，再用 attendance_query 查询；姓名重名时根据候选ID选择，勿猜选。主动打卡仍使用配置的固定员工。仅在用户明确要求打卡时调用 attendance_clock_in；未完成时用 attendance_clock_in_status 查询同一任务，只有 attendance_confirmed=true 才确认有记录。
+    instructions: 此连接提供员工列表、动态员工考勤查询、加班统计、主动打卡和任务状态查询。attendance_query 返回全部日期考勤，attendance_overtime 仅在 days 返回按配置筛选的加班日及全部打卡，并提供 summary；complete=false 时查看 errors，不能把查询失败当成没有加班。可先用 employee_list 获取员工ID；姓名重名时根据候选ID选择，勿猜选。主动打卡仍使用配置的固定员工。仅在用户明确要求打卡时调用 attendance_clock_in；未完成时用 attendance_clock_in_status 查询同一任务，只有 attendance_confirmed=true 才确认有记录。
     type: http
     base_url: http://127.0.0.1:18101
     headers:
@@ -46,6 +46,46 @@ services:
             in: query
             required: false
             description: simple返回摘要，full在各条records的details中附上完整原始字段，包括实际返回的地址、坐标、设备和Wi-Fi等。
+            schema:
+              type: string
+              enum: [simple, full]
+              default: simple
+      - name: attendance_overtime
+        description: 复用日期范围考勤查询，只在days返回加班日及当天全部打卡，另附summary、complete和errors。按服务端固定时间配置判断，默认09:00上班、18:00下班、21:00（含）为门槛；有实际OffDuty才参与，同工作日取最晚下班卡，达到门槛后从18:00计时，例如21:30为3.5小时。跨午夜按work_date归属，不使用钉钉计划时间。缺下班卡直接排除；查询失败不能当成未加班。参数、姓名选择、simple/full与attendance_query相同；实际规则以响应rule为准。
+        method: GET
+        path: /api/attendance/overtime
+        read_only: true
+        parameters:
+          - name: start_date
+            in: query
+            required: true
+            description: 起始工作日，包含当天，格式为 yyyy-MM-dd。
+            schema:
+              type: string
+              format: date
+              pattern: '^\d{4}-\d{2}-\d{2}$'
+          - name: end_date
+            in: query
+            required: true
+            description: 结束工作日，包含当天，默认单次最多31天。
+            schema:
+              type: string
+              format: date
+              pattern: '^\d{4}-\d{2}-\d{2}$'
+          - name: user_id
+            in: query
+            required: false
+            description: 可选完整员工ID，与user_name互斥；均省略时使用默认员工。
+            schema: {type: string}
+          - name: user_name
+            in: query
+            required: false
+            description: 可选精确姓名，重名返回候选ID；与user_id互斥。
+            schema: {type: string}
+          - name: detail
+            in: query
+            required: false
+            description: simple返回摘要，full保留加班日各条records的原始details。
             schema:
               type: string
               enum: [simple, full]

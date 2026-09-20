@@ -27,3 +27,11 @@ X-Api-Key: {{officeApiKey}}
 ### 提供给网关的 OpenAPI 文档
 GET {{baseUrl}}/openapi/v1.json
 X-Api-Key: {{officeApiKey}}
+
+### 查询加班日，默认21:00（含）起算，达到门槛后从18:00计算时长
+GET {{baseUrl}}/api/attendance/overtime?start_date=2026-09-01&end_date=2026-09-14
+X-Api-Key: {{officeApiKey}}
+
+### 按员工查询加班日全部原始打卡明细（ID为合成示例）
+GET {{baseUrl}}/api/attendance/overtime?start_date=2026-09-01&end_date=2026-09-14&user_id=test-user-000001&detail=full
+X-Api-Key: {{officeApiKey}}

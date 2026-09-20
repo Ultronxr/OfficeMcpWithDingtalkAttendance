@@ -22,6 +22,7 @@ internal sealed class OfficeApiFactory : WebApplicationFactory<Program>
     public FakeDingTalkHandler Handler { get; } = new();
     public TestClock Clock { get; } = new();
     public Action<AttendanceOptions>? ConfigureAttendance { get; set; }
+    public Action<OvertimeOptions>? ConfigureOvertime { get; set; }
     public bool EnableDevices { get; set; }
     public const string DeviceKey = "synthetic-device-key-12345678901234567890";
     public string DeviceStateDirectory { get; } = Path.Combine(Path.GetTempPath(), "office-mcp-tests", Guid.NewGuid().ToString("N"));
@@ -47,6 +48,7 @@ internal sealed class OfficeApiFactory : WebApplicationFactory<Program>
                 x.UserId = UserId;
                 ConfigureAttendance?.Invoke(x);
             });
+            services.PostConfigure<OvertimeOptions>(x => ConfigureOvertime?.Invoke(x));
             // 既有查询测试不启动真实的远程设备工作流。
             services.PostConfigure<DeviceCommandOptions>(x =>
             {

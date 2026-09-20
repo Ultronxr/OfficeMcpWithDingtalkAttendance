@@ -1,4 +1,3 @@
-using System.Globalization;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
@@ -21,6 +20,11 @@ public static class AttendanceEndpoints
             .Validate(x => x.QueryTimeoutSeconds is >= 1 and <= 210, "Attendance:QueryTimeoutSeconds 必须在 1 至 210 秒之间。")
             .ValidateOnStart();
         services.AddScoped<AttendanceService>();
+        services.AddOptions<OvertimeOptions>().Bind(configuration.GetSection("Overtime"))
+            .Validate(x => x.WorkStartTime < x.WorkEndTime && x.WorkEndTime <= x.ThresholdTime,
+                "Overtime 时间必须满足同一天内 WorkStartTime < WorkEndTime <= ThresholdTime。")
+            .ValidateOnStart();
+        services.AddScoped<OvertimeService>();
         services.AddSwaggerGen(options => options.OperationFilter<AttendanceDateOperationFilter>());
         return services;
     }
@@ -33,6 +37,12 @@ public static class AttendanceEndpoints
             .WithSummary("查询员工日期范围内的打卡明细")
             .WithDescription("start_date 和 end_date 必填，格式 yyyy-MM-dd，包含首尾日期，自动按最多七天分段。user_id、user_name 可选其一，都不填使用默认员工；姓名精确匹配，重名返回候选 ID。detail 默认 simple，full 附上完整原始明细。结果按工作日升序，失败段的日期 success=false，其他段仍返回。摘要时间为北京时间。")
             .ProducesProblem(401).ProducesProblem(404).ProducesProblem(409)
+            .ProducesProblem(500).ProducesProblem(502).ProducesProblem(504);
+        group.MapGet("/attendance/overtime", QueryOvertimeAsync)
+            .WithName("attendance_overtime").WithTags("Attendance")
+            .WithSummary("查询日期范围内的加班日考勤与加班统计")
+            .WithDescription("复用考勤查询的日期、员工及 detail 参数。按服务端固定作息配置判断，不使用钉钉计划时间；有实际 OffDuty 下班卡才参与，每个工作日取最晚一次，达到门槛（含）即计加班，时长从配置的正常下班时间开始。跨午夜按原 work_date 归属。days 仅含加班日并保留当天全部打卡记录；summary 汇总成功日期，complete=false 时必须同时查看 errors，不得把查询失败当成未加班。")
+            .ProducesProblem(400).ProducesProblem(401).ProducesProblem(404).ProducesProblem(409)
             .ProducesProblem(500).ProducesProblem(502).ProducesProblem(504);
         return group;
     }
@@ -55,50 +65,48 @@ public static class AttendanceEndpoints
         [FromQuery(Name = "detail")] string? detail, AttendanceService service,
         IOptions<AttendanceOptions> options, HttpContext context, CancellationToken cancellationToken)
     {
-        var errors = new Dictionary<string, string[]>();
-        var start = ParseDate("start_date", startDate, context, errors);
-        var end = ParseDate("end_date", endDate, context, errors);
-        foreach (var name in new[] { "user_id", "user_name", "detail" })
-            if (context.Request.Query[name].Count > 1) errors[name] = ["参数只能填写一个值。"];
-        userId = string.IsNullOrWhiteSpace(userId) ? null : userId.Trim();
-        userName = string.IsNullOrWhiteSpace(userName) ? null : userName.Trim();
-        if (userId is not null && userName is not null) errors["user_id"] = ["user_id 和 user_name 只能选择一个。"];
-        if (userId?.Length > 256) errors["user_id"] = ["员工 ID 不能超过 256 个字符。"];
-        if (userName?.Length > 100) errors["user_name"] = ["姓名不能超过 100 个字符。"];
-        if (detail is not null and not "simple" and not "full") errors["detail"] = ["detail 仅支持 simple 或 full。"];
-        if (errors.Count > 0) return TypedResults.ValidationProblem(errors);
-        if (start > end)
-            errors["end_date"] = ["结束日期不能早于开始日期。"];
-        else if (end.DayNumber - start.DayNumber + 1 > options.Value.MaxQueryDays)
-            errors["end_date"] = [$"单次查询最多 {options.Value.MaxQueryDays} 天，包含开始和结束日期。"];
-        if (errors.Count > 0) return TypedResults.ValidationProblem(errors);
-        return TypedResults.Ok(await service.QueryAsync(start, end, userId, userName, detail == "full", cancellationToken));
+        // 显式保留五个绑定参数供 OpenAPI 描述，实际验证统一读取请求，避免两个工具规则漂移。
+        var query = AttendanceQueryParameters.Parse(context, options.Value, out var errors);
+        if (query is null) return TypedResults.ValidationProblem(errors);
+        return TypedResults.Ok(await service.QueryAsync(query.StartDate, query.EndDate,
+            query.UserId, query.UserName, query.FullDetail, cancellationToken));
     }
 
-    /// <summary>读取严格的单值日期，将参数问题收集为统一的 400 响应。</summary>
-    /// <param name="name">查询参数名称。</param>
-    /// <param name="value">参数文本。</param>
-    /// <param name="context">用于检查重复参数的 HTTP 上下文。</param>
-    /// <param name="errors">待返回的参数错误集合。</param>
-    private static DateOnly ParseDate(string name, string? value, HttpContext context,
-        Dictionary<string, string[]> errors)
+    /// <summary>使用同一参数校验与考勤查询能力，只返回按配置筛选的加班日及汇总。</summary>
+    /// <param name="startDate">必填起始工作日，包含当天。</param>
+    /// <param name="endDate">必填结束工作日，包含当天。</param>
+    /// <param name="userId">可选员工 ID，与姓名互斥。</param>
+    /// <param name="userName">可选精确姓名，重名仍由原员工查询处理。</param>
+    /// <param name="detail">simple 或 full，决定加班日的打卡明细层次。</param>
+    /// <param name="service">复用考勤结果的加班筛选服务。</param>
+    /// <param name="options">原考勤查询限制。</param>
+    /// <param name="context">原 HTTP 查询参数。</param>
+    /// <param name="cancellationToken">客户端取消标记。</param>
+    private static async Task<Results<Ok<OvertimeResponse>, ValidationProblem>> QueryOvertimeAsync(
+        [FromQuery(Name = "start_date")] string? startDate,
+        [FromQuery(Name = "end_date")] string? endDate,
+        [FromQuery(Name = "user_id")] string? userId,
+        [FromQuery(Name = "user_name")] string? userName,
+        [FromQuery(Name = "detail")] string? detail, OvertimeService service,
+        IOptions<AttendanceOptions> options, HttpContext context, CancellationToken cancellationToken)
     {
-        if (context.Request.Query[name].Count == 1 && value?.Length == 10
-            && DateOnly.TryParseExact(value, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var date))
-            return date;
-        errors[name] = ["请提供唯一有效的日期，格式为 yyyy-MM-dd，例如 2026-09-10。"];
-        return default;
+        var query = AttendanceQueryParameters.Parse(context, options.Value, out var errors);
+        if (query is null) return TypedResults.ValidationProblem(errors);
+        return TypedResults.Ok(await service.QueryAsync(query, cancellationToken));
     }
 }
 
 /// <summary>描述日期范围参数，确保网关正确识别首尾日期和范围限制。</summary>
-public sealed class AttendanceDateOperationFilter(IOptions<AttendanceOptions> options) : IOperationFilter
+public sealed class AttendanceDateOperationFilter(IOptions<AttendanceOptions> options, IOptions<OvertimeOptions> overtime) : IOperationFilter
 {
     /// <summary>为考勤查询补充日期约束，不修改其他功能的 OpenAPI 契约。</summary>
     public void Apply(OpenApiOperation operation, OperationFilterContext context)
     {
-        if (operation.OperationId != "attendance_query") return;
-        operation.Description += $" 单次最多 {options.Value.MaxQueryDays} 天；查询失败的日期以 success=false 和 error 表示，成功日期仍返回。";
+        if (operation.OperationId is not ("attendance_query" or "attendance_overtime")) return;
+        operation.Description += $" 单次最多 {options.Value.MaxQueryDays} 天。";
+        operation.Description += operation.OperationId == "attendance_query"
+            ? "查询失败的日期以 success=false 和 error 表示，成功日期仍返回。"
+            : $"当前配置：{overtime.Value.WorkStartTime:HH:mm:ss} 上班、{overtime.Value.WorkEndTime:HH:mm:ss} 下班、{overtime.Value.ThresholdTime:HH:mm:ss}（含）起计加班；达到门槛后从正常下班时间计时。";
         foreach (var name in new[] { "start_date", "end_date" })
         {
             var parameter = operation.Parameters.Single(x => x.Name == name);

@@ -4,7 +4,7 @@
 services:
   - name: office_common_tools
     title: 办公服务 · 考勤
-    instructions: 此连接提供员工列表、动态员工考勤查询、主动打卡和任务状态查询。可先用 employee_list 获取员工ID，再用 attendance_query 查询；姓名重名时根据候选ID选择，勿猜选。主动打卡仍使用配置的固定员工。仅在用户明确要求打卡时调用 attendance_clock_in；未完成时用 attendance_clock_in_status 查询同一任务，只有 attendance_confirmed=true 才确认有记录。
+    instructions: 此连接提供员工列表、动态员工考勤查询、加班统计、主动打卡和任务状态查询。attendance_query 返回全部日期考勤，attendance_overtime 仅在 days 返回按配置筛选的加班日及全部打卡，并提供 summary；complete=false 时查看 errors，不能把查询失败当成没有加班。可先用 employee_list 获取员工ID；姓名重名时根据候选ID选择，勿猜选。主动打卡仍使用配置的固定员工。仅在用户明确要求打卡时调用 attendance_clock_in；未完成时用 attendance_clock_in_status 查询同一任务，只有 attendance_confirmed=true 才确认有记录。
     type: openapi
     base_url: http://127.0.0.1:18101
     spec_url: http://127.0.0.1:18101/openapi/v1.json
@@ -12,4 +12,4 @@ services:
       X-Api-Key: "${OFFICE_API_KEY}"
     timeout_seconds: 150
     methods: [GET, POST]
-    include_operations: [attendance_query, employee_list, attendance_clock_in, attendance_clock_in_status]
+    include_operations: [attendance_query, attendance_overtime, employee_list, attendance_clock_in, attendance_clock_in_status]

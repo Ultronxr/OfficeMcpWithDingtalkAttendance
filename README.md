@@ -1,6 +1,6 @@
 # Office HTTP API
 
-通用办公 HTTP 服务，目标框架 `net8.0`，提供钉钉考勤查询及手机远程打卡。可在 Linux 上由 systemd 托管，也可在 Windows 本地运行。[架构与接口约定](docs/architecture.md)说明了模块边界。
+通用办公 HTTP 服务，目标框架 `net8.0`，提供钉钉考勤查询、按打卡时间筛选的加班统计及手机远程打卡。可在 Linux 上由 systemd 托管，也可在 Windows 本地运行。[架构与接口约定](docs/architecture.md)说明了模块边界。
 
 AutoJs6 远程打卡与上午本地定时打卡共用持久化 Task 和钉钉 API 核验。定时动作后由常驻接收器上报执行事实、取回结果并写入手机日志，断网只补传事实，不重做动作。手机部署见 [定时与远程打卡说明](autojs6/README.md)，当前部署和运维见 [部署说明](docs/deployment.md)。
 
@@ -120,6 +120,78 @@ ConvertTo-Json -InputObject $officeResult -Depth 6
 
 参数校验、认证、员工解析及内部错误采用 `application/problem+json`。考勤分段的业务错误、网络失败、损坏响应、用户不匹配和超时放入对应日期的 `error`，含 `code`、`message` 及可用的 `provider_code`，不会丢弃其他分段的成功结果。单次 HTTP 超时使用 `dingtalk_timeout`，整次范围查询超时使用 `attendance_query_timeout`。
 
+## 加班日期与时长查询
+
+`GET /api/attendance/overtime` 对应只读 MCP 工具 `attendance_overtime`。入参与 `attendance_query` 相同：`start_date`、`end_date` 必填，`user_id`／`user_name` 二选一或均省略，`detail` 为 `simple`／`full`。内部直接复用原考勤查询的一次调用，保留七天分段、姓名消歧、日期上限、超时和原明细，不另查排班或审批接口。
+
+原考勤工具返回所有日期，并展示钉钉返回的计划时间；加班工具按服务端 `Overtime` 配置筛选，`days` 只返回加班日，每个加班日保留当天全部 `records`，再添加 `overtime`。同一工作日有多个下班记录时取最晚实际下班时间，只计一次；没有实际 `OffDuty` 时间就排除，不要求同时存在上班卡。
+
+默认配置：
+
+```json
+"Overtime": {
+  "WorkStartTime": "09:00",
+  "WorkEndTime": "18:00",
+  "ThresholdTime": "21:00"
+}
+```
+
+这三个时间可以在 `appsettings.Local.json` 中覆盖，或使用 `Overtime__WorkStartTime`、`Overtime__WorkEndTime`、`Overtime__ThresholdTime` 环境变量；修改后重启生效。必须满足同一日内上班 < 下班 <= 门槛。上班时间只用于展示规则，不改变原迟到／早退状态或手机定时。
+
+**实际下班时间达到 21:00:00 即计加班，达到门槛后从 18:00 开始计时。** 20:59:59 不计，21:00 计 3 小时，21:30 计 3.5 小时。跨午夜仍按原 `work_date` 归属，例如次日 00:30 的下班卡归属前一天，计 6.5 小时。不扣餐休或按整点取整；秒数保留时间差精度，小时数四舍五入到两位，合计小时从总秒数换算，不累加逐日舍入值。
+
+返回结构示例（合成数据）：
+
+```json
+{
+  "start_date": "2026-09-10",
+  "end_date": "2026-09-10",
+  "time_zone": "Asia/Shanghai",
+  "rule": {
+    "work_start_time": "09:00:00",
+    "work_end_time": "18:00:00",
+    "threshold_time": "21:00:00",
+    "threshold_inclusive": true,
+    "duration_basis": "work_end"
+  },
+  "days": [
+    {
+      "work_date": "2026-09-10",
+      "user_id": "tes**********001",
+      "time_zone": "Asia/Shanghai",
+      "records": [
+        {
+          "check_type": "OffDuty",
+          "check_type_name": "下班",
+          "planned_check_time": "2026-09-10T18:00:00+08:00",
+          "actual_check_time": "2026-09-10T21:30:00+08:00",
+          "status_code": "Normal",
+          "status": "正常"
+        }
+      ],
+      "overtime": {
+        "normal_work_start": "2026-09-10T09:00:00+08:00",
+        "normal_work_end": "2026-09-10T18:00:00+08:00",
+        "threshold_at": "2026-09-10T21:00:00+08:00",
+        "last_off_duty_at": "2026-09-10T21:30:00+08:00",
+        "overtime_seconds": 12600,
+        "overtime_hours": 3.5
+      },
+      "success": true
+    }
+  ],
+  "summary": {
+    "overtime_days": 1,
+    "total_overtime_seconds": 12600,
+    "total_overtime_hours": 3.5
+  },
+  "complete": true,
+  "errors": []
+}
+```
+
+当 `complete=true` 且 `days=[]` 时，表示请求范围内没有满足当前规则的日期，汇总为零。部分或全部分段查询失败时 `complete=false`，`errors` 按工作日列出原 `code`、`message` 和可用的 `provider_code`；成功日期中的加班结果仍保留，汇总只覆盖这些成功日期，不能当作完整统计。缺下班卡的成功日期直接排除，不列入错误。HTTP 鉴权、参数和姓名解析错误沿用原考勤接口。
+
 ## 发布与 NSSM
 
 构建需要支持 net8.0 的 .NET SDK，发布程序需要 Windows x64 上安装 ASP.NET Core 8 运行时。
@@ -170,14 +242,14 @@ Invoke-RestMethod http://127.0.0.1:18101/healthz
 
 准备了两种匹配现有网关实现的配置，二选一：
 
-- `deploy/gateway-office.openapi.yaml`：从受保护的 `/openapi/v1.json` 导入考勤查询、员工列表、远程打卡和任务状态四个操作。
+- `deploy/gateway-office.openapi.yaml`：从受保护的 `/openapi/v1.json` 导入考勤查询、加班统计、员工列表、远程打卡和任务状态五个操作。
 - `deploy/gateway-office.http.yaml`：手工描述 HTTP 工具，网关启动时无需读取本服务文档。
 
 将示例服务项合并到自己的 mcp-gateway 配置中，例如 `/opt/mcp-gateway/config/gateway.yaml`，并在网关私密环境配置 `OFFICE_API_KEY`，值与本服务的 `Authentication:ApiKey` 相同。随后重启网关并刷新客户端工具列表。MCP 地址示例为 `https://mcp.example.com/office_common_tools/mcp`，需替换为实际域名；工具名保留后端原名，`attendance_query` 的必填参数为 `start_date` 和 `end_date`，返回按日组织的数组。
 
-升级已有接入时，OpenAPI 方式需要让网关重新读取在线服务文档，并将 `employee_list` 加入白名单；手工 HTTP 方式需同步新参数及员工列表工具。两份网关示例的 HTTP 超时为 150 秒，高于服务默认的 120 秒整次查询限制。如调整服务超时或日期上限，请同步更新网关配置和工具说明。此处配置示例不会自动修改线上网关。
+升级已有接入时，OpenAPI 方式需要让网关重新读取在线服务文档，并将 `attendance_overtime` 加入既有白名单（尚未接入员工工具时同时加入 `employee_list`）；手工 HTTP 方式需同步工具定义。两份网关示例的 HTTP 超时为 150 秒，高于服务默认的 120 秒整次查询限制。如调整服务超时或日期上限，请同步更新网关配置和工具说明。此处配置示例不会自动修改线上网关。
 
-远程打卡为 `attendance_clock_in`（POST）与 `attendance_clock_in_status`（GET）；仍使用配置的固定员工，通过 `/topapi/attendance/getupdatedata` 核验，不随动态查询员工改变。其启用、设备配对和调用语义见远程打卡说明。网关使用 `methods: [GET, POST]`，`include_operations` 包含这两个 operationId、`attendance_query` 和 `employee_list`。仅发布办公服务或刷新客户端不会修改旧白名单。设备领取／回执接口使用独立认证，不作为 Agent 工具导入。
+远程打卡为 `attendance_clock_in`（POST）与 `attendance_clock_in_status`（GET）；仍使用配置的固定员工，通过 `/topapi/attendance/getupdatedata` 核验，不随动态查询员工改变。其启用、设备配对和调用语义见远程打卡说明。网关使用 `methods: [GET, POST]`，`include_operations` 包含这两个 operationId、`attendance_query`、`attendance_overtime` 和 `employee_list`。仅发布办公服务或刷新客户端不会修改旧白名单。设备领取／回执接口使用独立认证，不作为 Agent 工具导入。
 
 ## 验证
 
@@ -185,7 +257,7 @@ Invoke-RestMethod http://127.0.0.1:18101/healthz
 dotnet test OfficeMcp.sln -c Release -m:1
 ```
 
-测试使用合成用户和内存 HTTP 替身覆盖认证、日期范围边界、七天分段、OpenAPI 契约、完整明细、部分失败、整体超时、部门递归与员工分页、重名选择、目录缓存、令牌缓存和失效重试，不访问真实钉钉接口。
+测试使用合成用户和内存 HTTP 替身覆盖认证、日期范围边界、七天分段、OpenAPI 契约、完整明细、部分失败、整体超时、部门递归与员工分页、重名选择、目录缓存、令牌缓存、失效重试，以及加班门槛、配置覆盖、多次下班、跨午夜、精确时长与失败隔离，不访问真实钉钉接口。
 
 ## 私密配置
 
