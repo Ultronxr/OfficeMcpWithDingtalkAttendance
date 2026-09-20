@@ -2,7 +2,7 @@
 
 通用办公 HTTP 服务，目标框架 `net8.0`，提供钉钉考勤查询及手机远程打卡。可在 Linux 上由 systemd 托管，也可在 Windows 本地运行。[架构与接口约定](docs/architecture.md)说明了模块边界。
 
-AutoJs6 远程打卡联动保留原定时脚本，增加常驻接收、持久化命令和钉钉结果核验。手机部署见 [远程打卡说明](autojs6/README.md)，当前部署和运维见 [部署说明](docs/deployment.md)。
+AutoJs6 远程打卡与上午本地定时打卡共用持久化 Task 和钉钉 API 核验。定时动作后由常驻接收器上报执行事实、取回结果并写入手机日志，断网只补传事实，不重做动作。手机部署见 [定时与远程打卡说明](autojs6/README.md)，当前部署和运维见 [部署说明](docs/deployment.md)。
 
 ## 部署方式
 

@@ -10,6 +10,7 @@ const scriptPath = '/storage/emulated/0/脚本/自动打卡/autojs6_autowake.js'
 const scriptFolder = path.posix.dirname(scriptPath);
 const entrySource = fs.readFileSync(path.resolve(__dirname, '../../autojs6/autojs6_autowake.js'), 'utf8');
 const actionsSource = fs.readFileSync(path.resolve(__dirname, '../../autojs6/office_device_actions.js'), 'utf8');
+const queueSource = fs.readFileSync(path.resolve(__dirname, '../../autojs6/office_attendance_queue.js'), 'utf8');
 const bodyOffset = entrySource.indexOf('(function () {');
 
 /** 将测试用的本地时间转换为固定日期时间戳，避免运行日期影响结果。 */
@@ -31,8 +32,11 @@ function run(options = {}) {
     let clock = options.now ?? at('08:30:00');
     let state = { plans: structuredClone(options.plans || []) };
     let screenOn = options.screenOn ?? false;
-    let fileLocked = false;
+    const locks = new Set();
+    const memoryFiles = new Map(options.files || []);
     let loadedActions;
+    let loadedQueue;
+    let nextUuid = 1;
     const logs = [];
     const created = [];
     const calls = { wake: [], launch: [], keep: [], cancelKeep: [] };
@@ -55,19 +59,42 @@ function run(options = {}) {
 
     /** 模拟入口目录解析，仅提供生产脚本实际调用的 Java File 方法。 */
     function JavaFile(name) {
+        this.path = String(name);
         this.getParent = () => path.posix.dirname(String(name));
+        this.getName = () => path.posix.basename(String(name));
         this.mkdirs = () => true;
     }
 
+    /** 模拟 Java UTF-8 字符串转换，不依赖 Android 或真实文件系统。 */
+    function JavaString(value) {
+        this.toString = () => String(value);
+        this.getBytes = () => String(value);
+    }
+
+    /** 模拟 Android AtomicFile 的成功提交和失败回滚，用于持久化恢复测试。 */
+    function AtomicFile(file) {
+        this.startWrite = () => {
+            if (options.failQueueWrites) throw new Error('模拟存储故障');
+            return { value: '', write(value) { this.value = String(value); } };
+        };
+        this.finishWrite = output => { memoryFiles.set(file.path, output.value); };
+        this.failWrite = () => {};
+        this.readFully = () => {
+            if (!memoryFiles.has(file.path)) throw new Error('文件不存在');
+            return memoryFiles.get(file.path);
+        };
+    }
+
     /** 用内存锁与虚拟时钟模拟多个入口争用同一设备锁的情况。 */
-    function RandomAccessFile() {
+    function RandomAccessFile(name) {
+        const key = String(name);
         this.close = () => {};
         this.getChannel = () => ({
             close() {},
             tryLock() {
-                if (fileLocked || clock < (options.lockBusyUntil ?? 0)) return null;
-                fileLocked = true;
-                return { release() { fileLocked = false; } };
+                if (locks.has(key) || (key.endsWith('/screen-action.lock') && clock < (options.lockBusyUntil ?? 0))) return null;
+                locks.add(key);
+                return { release() { locks.delete(key); } };
             }
         });
     }
@@ -80,8 +107,11 @@ function run(options = {}) {
         sleep: milliseconds => { clock += milliseconds; },
         events: { on() {} },
         files: { path: value => value, join: (...values) => path.posix.join(...values),
-            exists: () => true, append() {} },
-        java: { io: { File: JavaFile, RandomAccessFile } },
+            exists: () => true, append(name, text) { memoryFiles.set(name, (memoryFiles.get(name) || '') + text); },
+            listDir: directory => [...memoryFiles.keys()].filter(name => path.posix.dirname(name) === directory).map(name => path.posix.basename(name)) },
+        java: { io: { File: JavaFile, RandomAccessFile }, lang: { String: JavaString },
+            util: { UUID: { randomUUID: () => (nextUuid++).toString(16).padStart(32, '0') } } },
+        android: { util: { AtomicFile } },
         engines: { myEngine: () => ({ getSource: () => scriptPath,
             execArgv: { intent: { getLongExtra: () => options.taskId ?? -1 } } }) },
         device: {
@@ -112,6 +142,14 @@ function run(options = {}) {
     };
     const context = vm.createContext({ ...api });
     context.require = requested => {
+        if (requested === path.posix.join(scriptFolder, 'office_attendance_queue.js')) {
+            if (!loadedQueue) {
+                const moduleContext = { ...api, require: context.require, module: { exports: {} } };
+                vm.runInNewContext(queueSource, moduleContext, { timeout: 1000 });
+                loadedQueue = moduleContext.module.exports;
+            }
+            return loadedQueue;
+        }
         assert.equal(requested, path.posix.join(scriptFolder, 'office_device_actions.js'));
         if (!loadedActions) {
             const moduleContext = { ...api, module: { exports: {} } };
@@ -123,9 +161,11 @@ function run(options = {}) {
     // 仅替换用例配置，规划和执行函数均来自生产文件，不复制其算法。
     vm.runInContext(entrySource.slice(0, bodyOffset), context, { timeout: 1000 });
     Object.assign(context.CONFIG, { randomStart: '08:35:00', randomEnd: '08:50:00',
-        keepScreenOnSeconds: 0, ...options.config });
+        keepScreenOnSeconds: 0, delayBufferSeconds: 300, ...options.config });
     vm.runInContext(entrySource.slice(bodyOffset), context, { timeout: 1000 });
-    return { state, logs, created, calls, removed, taskMap, clock, fileLocked };
+    return { state, logs, created, calls, removed, taskMap, clock, fileLocked: locks.size > 0,
+        files: memoryFiles, queue: loadedQueue, advance(milliseconds) { clock += milliseconds; },
+        getQueue: () => context.require(path.posix.join(scriptFolder, 'office_attendance_queue.js')) };
 }
 
 test('随机登记包含 start 和 end−5分钟，实际窗口完整保存', () => {
@@ -283,4 +323,140 @@ test('cancel 仅取消已登记子任务，保留手动主任务及历史记录'
     assert.equal(result.state.plans[0].status, 'skipped');
     assert.equal(result.state.plans[1].status, 'cancelled');
     assert.equal(result.calls.launch.length, 0);
+});
+
+/** 从内存文件读取唯一执行队列条目，验证真实模块的持久化结果。 */
+function queueEntries(result) {
+    return [...result.files].filter(([name]) => name.includes('/attendance/') && name.endsWith('.json')).map(([, text]) => JSON.parse(text));
+}
+
+/** 合成服务端安全摘要，不使用真实 Task、员工或设备资料。 */
+function taskResult(terminal = false) {
+    return { task_id: 'a'.repeat(32), source: 'local_schedule', is_terminal: terminal,
+        state: terminal ? 'succeeded' : 'verifying', attendance_confirmed: terminal,
+        verification_relation: terminal ? 'within_execution_window' : null,
+        record: terminal ? { actual_check_time: '2026-09-16T08:40:04+08:00', status_code: 'Normal' } : null };
+}
+
+test('上午子任务动作前持久化执行标识，保存阶段时间且不产生网络依赖', () => {
+    const result = run({ plans: [plan()], taskId: 16, now: at('08:40:00') });
+    const [entry] = queueEntries(result);
+    assert.match(entry.report.local_run_id, /^[a-f0-9]{32}$/);
+    assert.equal(entry.report.local_run_id, result.state.plans[0].localRunId);
+    assert.equal(entry.report.executed_at_unix_ms, at('08:40:00'));
+    assert.equal(entry.report.screen_on_at_unix_ms, at('08:40:00.400'));
+    assert.equal(entry.report.app_requested_at_unix_ms, at('08:40:01.200'));
+    assert.equal(entry.report.outcome, 'launch_requested');
+    assert.equal(entry.state, 'pending');
+    assert.equal(result.calls.launch.length, 1);
+    assert.equal(result.fileLocked, false);
+});
+
+test('存储故障不阻止原定时动作，也不会宣称已进入服务端核验', () => {
+    const result = run({ plans: [plan()], taskId: 16, now: at('08:40:00'), failQueueWrites: true });
+    assert.equal(result.calls.launch.length, 1);
+    assert.equal(result.fileLocked, false);
+    assert.equal(queueEntries(result).length, 0);
+    assert.ok(result.logs.some(line => line.includes('VERIFY_STORAGE_ERROR')));
+});
+
+test('断网和响应丢失后重启只补传相同执行事实，最终结果写回入口日志', () => {
+    const first = run({ plans: [plan()], taskId: 16, now: at('08:40:00') });
+    let firstBody;
+    first.queue.pump((method, url, body) => {
+        assert.equal(method, 'POST');
+        firstBody = JSON.parse(JSON.stringify(body));
+        throw new Error('模拟服务端已接收但响应丢失');
+    }, 'office-phone');
+    assert.equal(queueEntries(first)[0].state, 'pending');
+    const restored = run({ plans: first.state.plans, files: first.files, now: at('08:41:00') });
+    const queue = restored.getQueue();
+    queue.pump((method, url, body) => {
+        assert.equal(method, 'POST');
+        assert.deepEqual(JSON.parse(JSON.stringify(body)), firstBody);
+        return taskResult();
+    }, 'office-phone');
+    assert.equal(queueEntries(restored)[0].task_id, 'a'.repeat(32));
+    restored.advance(5000);
+    queue.pump((method, url, body) => {
+        assert.equal(method, 'GET');
+        assert.equal(body, null);
+        assert.ok(url.endsWith('/tasks/' + 'a'.repeat(32)));
+        return taskResult(true);
+    }, 'office-phone');
+    assert.equal(queueEntries(restored)[0].state, 'done');
+    assert.ok(restored.files.get(scriptPath + '.log').includes('VERIFY_RESULT'));
+    assert.ok(restored.files.get(scriptPath + '.log').includes('2026-09-16T08:40:04+08:00'));
+    queue.pump(() => assert.fail('终态不再请求服务器'), 'office-phone');
+    assert.equal(restored.calls.launch.length, 0);
+    assert.equal(restored.calls.wake.length, 0);
+});
+
+test('未完成动作受执行锁保护，中断恢复只上报不确定事实及已保存阶段', () => {
+    const result = run();
+    const queue = result.getQueue();
+    const handle = queue.begin('b'.repeat(32), '2026-09-16', at('08:30:00'), 'autojs6_autowake.js.log');
+    queue.stage(handle, 'screen_on', at('08:30:00'));
+    queue.pump(() => assert.fail('正在动作时不可提前上报半成品'), 'office-phone');
+    // 模拟引擎退出释放 OS 文件锁，未执行 complete。
+    handle.release();
+    queue.pump((method, url, body) => {
+        assert.equal(body.outcome, 'uncertain');
+        assert.equal(body.error_code, 'execution_interrupted');
+        assert.equal(body.screen_on_at_unix_ms, at('08:30:00'));
+        assert.equal(body.completed_at_unix_ms, undefined);
+        return taskResult(true);
+    }, 'office-phone');
+    assert.equal(result.calls.launch.length, 0);
+    assert.equal(queueEntries(result)[0].state, 'done');
+});
+
+test('过期子任务仍登记执行事实，跳过设备动作', () => {
+    const result = run({ plans: [plan()], taskId: 16, now: at('08:51:00') });
+    assert.equal(result.calls.launch.length, 0);
+    const [entry] = queueEntries(result);
+    assert.equal(entry.report.outcome, 'expired');
+    assert.equal(entry.report.error_code, 'window_expired');
+    assert.equal(entry.report.app_requested_at_unix_ms, undefined);
+});
+
+test('超出当天首次补报范围时归档拒绝信息，已接受任务跨日仍只读查询', () => {
+    const result = run({ plans: [plan()], taskId: 16, now: at('08:40:00') });
+    result.advance(86400000);
+    result.queue.pump(() => { const error = new Error('日期已过'); error.httpStatus = 400; throw error; }, 'office-phone');
+    assert.equal(queueEntries(result)[0].state, 'rejected');
+    result.queue.pump(() => assert.fail('拒绝的首次补报不无限重试'), 'office-phone');
+    assert.ok(result.logs.some(line => line.includes('VERIFY_REJECTED')));
+
+    const accepted = run({ plans: [plan()], taskId: 16, now: at('08:40:00') });
+    accepted.queue.pump(() => taskResult(), 'office-phone');
+    accepted.advance(86400000);
+    accepted.queue.pump(method => { assert.equal(method, 'GET'); return taskResult(true); }, 'office-phone');
+    assert.equal(queueEntries(accepted)[0].state, 'done');
+});
+
+test('每轮只发送一个本地请求，坏记录与未升级接口不会饿死其他执行', () => {
+    const result = run();
+    const queue = result.getQueue();
+    for (const letter of ['c', 'd']) {
+        const handle = queue.begin(letter.repeat(32), '2026-09-16', at('08:30:00'), null);
+        queue.complete(handle, { outcome: 'uncertain', error_code: 'action_interrupted' });
+    }
+    let calls = 0;
+    queue.pump(() => { calls++; const error = new Error('接口未升级'); error.httpStatus = 404; throw error; }, 'office-phone');
+    assert.equal(calls, 1);
+    queue.pump(() => { calls++; return taskResult(true); }, 'office-phone');
+    assert.equal(calls, 2);
+    assert.deepEqual(queueEntries(result).map(entry => entry.state), ['pending', 'done']);
+});
+
+test('下午、direct 与显式关闭核验时不生成本地 Task 事实', () => {
+    const afternoon = run({ plans: [plan({ at: at('15:10:00'), startAt: at('15:00:00'), endAt: at('15:20:00') })],
+        taskId: 16, now: at('15:10:00') });
+    const direct = run({ config: { mode: 'direct' } });
+    const disabled = run({ plans: [plan()], taskId: 16, now: at('08:40:00'), config: { verifyScheduledAttendance: false } });
+    for (const result of [afternoon, direct, disabled]) {
+        assert.equal(result.calls.launch.length, 1);
+        assert.equal(queueEntries(result).length, 0);
+    }
 });

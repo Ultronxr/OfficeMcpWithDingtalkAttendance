@@ -1,6 +1,6 @@
 /*
  * AutoJs6 常驻远程接收器。普通脚本，不需要 ui、无障碍选择器或模拟点击。
- * 将本文件、office_device_actions.js 和 remote-config.local.json 放在同一目录。
+ * 将本文件、office_device_actions.js、office_attendance_queue.js 和 remote-config.local.json 放在同一目录。
  * 只执行服务端固定的 wake_dingtalk 动作，不执行远程传入的脚本或路径。
  */
 (function () {
@@ -8,6 +8,7 @@
     // AutoJs6 的 files 未提供 dirname；通过 Android 自带的 Java File 取得脚本目录。
     var folder = String(new java.io.File(selfPath).getParent());
     var actions = require(files.join(folder, "office_device_actions.js"));
+    var attendanceQueue = null;
     var listenerLock = null;
     var config;
     var store;
@@ -15,28 +16,38 @@
     /** 记录阶段和任务 ID；不记录 URL、请求头、响应原文或凭据。 */
     function report(message) { log("[Office MCP] " + message); }
 
+    /** 每轮显式检查中断与本引擎停止标记，避免长轮询和宽泛异常处理吞掉停止请求。 */
+    function stopRequested() {
+        return java.lang.Thread.currentThread().isInterrupted() ||
+            String(runtime.getProperty("office_mcp.listener.stop")) === "true";
+    }
+
     /**
      * 发送有超时、无重定向的 JSON 请求；只连接本地配置的服务地址。
+     * @param {string} method 固定 GET 或 POST。
      * @param {string} path 本地代码生成的 API 路径。
      * @param {Object} body 要发送的协议数据。
+     * @param {boolean} shortRequest 本地事实上报和查询使用短超时。
      * @returns {Object|null} JSON 响应；204 返回 null。
      */
-    function post(path, body) {
+    function request(method, path, body, shortRequest) {
         var connection = new java.net.URL(config.base_url + path).openConnection();
         var input = null;
         try {
-            connection.setRequestMethod("POST");
+            connection.setRequestMethod(method);
             connection.setInstanceFollowRedirects(false);
-            connection.setConnectTimeout(8000);
-            connection.setReadTimeout(35000);
-            connection.setDoOutput(true);
+            connection.setConnectTimeout(shortRequest ? 3000 : 8000);
+            connection.setReadTimeout(shortRequest ? 5000 : 35000);
             connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
             connection.setRequestProperty("X-Device-Id", config.device_id);
             connection.setRequestProperty("X-Device-Key", config.device_key);
-            var bytes = new java.lang.String(JSON.stringify(body)).getBytes("UTF-8");
-            connection.setFixedLengthStreamingMode(bytes.length);
-            var output = connection.getOutputStream();
-            try { output.write(bytes); output.flush(); } finally { output.close(); }
+            if (method === "POST") {
+                connection.setDoOutput(true);
+                var bytes = new java.lang.String(JSON.stringify(body)).getBytes("UTF-8");
+                connection.setFixedLengthStreamingMode(bytes.length);
+                var output = connection.getOutputStream();
+                try { output.write(bytes); output.flush(); } finally { output.close(); }
+            }
             var status = connection.getResponseCode();
             if (status === 204) return null;
             if (status < 200 || status >= 300) {
@@ -57,6 +68,12 @@
             connection.disconnect();
         }
     }
+
+    /** 原远程领取与回执保留已有长轮询超时。 */
+    function post(path, body) { return request("POST", path, body, false); }
+
+    /** 本地事实和结果使用短请求；一次失败不阻塞远程领取循环。 */
+    function attendanceRequest(method, path, body) { return request(method, path, body, true); }
 
     /** 上报持久化回执；失败保留待发送记录，之后只重传回执，不再执行动作。 */
     function sendReceipt(entry) {
@@ -92,7 +109,10 @@
         // 标记先于手机动作落盘。中断后只报告不确定并由服务端查询真实考勤。
         store.put("done_" + id, entry);
         store.put("pending_receipt", entry);
-        if (command.action !== "wake_dingtalk") {
+        if (stopRequested()) {
+            // 停止时已经领取的命令保留不确定回执，新实例只补传，不补做手机动作。
+            entry.receipt.error_code = "listener_stopping";
+        } else if (command.action !== "wake_dingtalk") {
             entry.receipt = { lease_token: entry.receipt.lease_token, outcome: "failed", error_code: "unsupported_action" };
         } else {
             var remaining = Number(command.expires_at_unix_ms) - Number(command.server_time_unix_ms);
@@ -137,14 +157,22 @@
         listenerLock = actions.acquire("remote-listener", 0, null);
         if (listenerLock == null) { report("已有接收脚本运行，本实例退出。"); return; }
         store = storages.create("office-mcp.remote.v1." + config.device_id);
+        try { attendanceQueue = require(files.join(folder, "office_attendance_queue.js")); }
+        catch (error) { report("本地考勤核验模块未加载，请检查 office_attendance_queue.js；远程接收继续运行。"); }
         report("远程接收器已启动，正在连接服务端；保留原来的定时任务。");
         var failures = 0;
         var hasConnected = false;
-        while (true) {
+        while (!stopRequested()) {
             try {
                 var pending = store.get("pending_receipt", null);
                 if (pending != null && !sendReceipt(pending)) { sleep(5000); continue; }
-                var command = post("/api/devices/" + config.device_id + "/commands/lease", { wait_seconds: 25 });
+                // 远程回执始终优先；每轮最多一个本地上报／结果查询，绝不在队列中重做动作。
+                var localPending = false;
+                if (attendanceQueue) {
+                    try { localPending = attendanceQueue.pump(attendanceRequest, config.device_id); }
+                    catch (error) { report("本地核验队列暂不可读，远程接收继续运行。"); }
+                }
+                var command = post("/api/devices/" + config.device_id + "/commands/lease", { wait_seconds: localPending ? 5 : 25 });
                 // 仅首次连接和失败后恢复时记录成功，正常的连续长轮询不刷屏。
                 if (!hasConnected) {
                     report("连接成功，正在等待远程命令。");
@@ -155,6 +183,7 @@
                 failures = 0;
                 if (command != null) execute(command);
             } catch (error) {
+                if (stopRequested()) break;
                 failures++;
                 // 日志与实际 sleep 使用同一个值，保持原有 2、4、8、16、30 秒退避规则。
                 var retryDelayMs = Math.min(30000, 1000 * Math.pow(2, Math.min(failures, 5)));

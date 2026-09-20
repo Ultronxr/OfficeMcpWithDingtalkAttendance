@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
 using OfficeMcp.Api.Features.Attendance;
 using OfficeMcp.Api.Infrastructure.DingTalk;
 using OfficeMcp.Api.Infrastructure.Security;
@@ -21,6 +22,9 @@ internal sealed class OfficeApiFactory : WebApplicationFactory<Program>
     public FakeDingTalkHandler Handler { get; } = new();
     public TestClock Clock { get; } = new();
     public Action<AttendanceOptions>? ConfigureAttendance { get; set; }
+    public bool EnableDevices { get; set; }
+    public const string DeviceKey = "synthetic-device-key-12345678901234567890";
+    public string DeviceStateDirectory { get; } = Path.Combine(Path.GetTempPath(), "office-mcp-tests", Guid.NewGuid().ToString("N"));
 
     /// <summary>替换外部 HTTP 和时间，并覆盖本机配置，保证测试互不影响。</summary>
     protected override void ConfigureWebHost(IWebHostBuilder builder)
@@ -44,7 +48,23 @@ internal sealed class OfficeApiFactory : WebApplicationFactory<Program>
                 ConfigureAttendance?.Invoke(x);
             });
             // 既有查询测试不启动真实的远程设备工作流。
-            services.PostConfigure<DeviceCommandOptions>(x => x.Enabled = false);
+            services.PostConfigure<DeviceCommandOptions>(x =>
+            {
+                x.Enabled = EnableDevices;
+                x.StateDirectory = DeviceStateDirectory;
+                x.Devices = new() { ["office-phone"] = new() { Key = DeviceKey }, ["other-phone"] = new() { Key = DeviceKey } };
+            });
+            services.PostConfigure<ClockInOptions>(x =>
+            {
+                x.DeviceId = "office-phone";
+                x.CommandTtlSeconds = 120;
+                x.ExecutionTimeoutSeconds = 60;
+                x.VerificationTimeoutSeconds = 120;
+                x.VerificationIntervalSeconds = 5;
+            });
+            // 测试显式推进后台处理，避免真实计时线程与断言竞争。
+            var worker = services.Single(x => x.ServiceType == typeof(IHostedService) && x.ImplementationType == typeof(ClockInWorker));
+            services.Remove(worker);
         });
     }
 
@@ -54,6 +74,22 @@ internal sealed class OfficeApiFactory : WebApplicationFactory<Program>
         var client = CreateClient();
         client.DefaultRequestHeaders.Add("X-Api-Key", ApiKey);
         return client;
+    }
+
+    /// <summary>仅使用合成设备凭据调用手机通道，不访问真实设备。</summary>
+    public HttpClient DeviceClient(string deviceId = "office-phone")
+    {
+        var client = CreateClient();
+        client.DefaultRequestHeaders.Add("X-Device-Id", deviceId);
+        client.DefaultRequestHeaders.Add("X-Device-Key", DeviceKey);
+        return client;
+    }
+
+    /// <summary>宿主释放文件锁后，只清理本次测试的独立临时状态目录。</summary>
+    public override async ValueTask DisposeAsync()
+    {
+        await base.DisposeAsync();
+        if (Directory.Exists(DeviceStateDirectory)) Directory.Delete(DeviceStateDirectory, recursive: true);
     }
 
     private sealed class FakeHttpClientFactory(FakeDingTalkHandler handler) : IHttpClientFactory
@@ -93,6 +129,9 @@ internal sealed class FakeDingTalkHandler : HttpMessageHandler
     public HttpStatusCode ResponseStatus { get; set; } = HttpStatusCode.OK;
     public bool SimulateTimeout { get; set; }
     public Func<string, CancellationToken, Task<string>>? AttendanceResponseAsync { get; set; }
+    public int VerificationCalls { get; private set; }
+    public Func<int, string> VerificationResponse { get; set; } = _ =>
+        """{"errcode":0,"result":{"userid":"test-user-000001","attendance_result_list":[]}}""";
 
     /// <summary>按路径区分令牌和考勤请求；意外地址立即失败。</summary>
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -113,7 +152,7 @@ internal sealed class FakeDingTalkHandler : HttpMessageHandler
             return Json(DirectoryResponse(request.RequestUri.AbsolutePath, directoryBody));
         }
         if (request.RequestUri.AbsolutePath == "/topapi/attendance/getupdatedata")
-            return Json("""{"errcode":0,"result":{"userid":"test-user-000001","attendance_result_list":[]}}""");
+            return Json(VerificationResponse(++VerificationCalls));
         Assert.Equal("/attendance/listRecord", request.RequestUri.AbsolutePath);
         Assert.Equal(HttpMethod.Post, request.Method);
         var count = Interlocked.Increment(ref _attendanceCalls);

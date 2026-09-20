@@ -20,12 +20,16 @@ public sealed class DeviceRegistration
 /// <summary>持久化命令，Payload、Metadata 和 Result 由具体业务解释。</summary>
 public sealed record DeviceCommandJob
 {
+    public const string RemoteCommand = "remote_command";
+    public const string LocalSchedule = "local_schedule";
     public required string Id { get; init; }
     public required string RequestId { get; init; }
     public required string Fingerprint { get; init; }
     public required string DeviceId { get; init; }
     public required string Kind { get; init; }
     public required string Action { get; init; }
+    // 旧任务没有 source 字段时，继续按远程命令解释，保持领取和核验兼容。
+    public string Source { get; init; } = RemoteCommand;
     public string State { get; init; } = "queued";
     public required DateTimeOffset CreatedAt { get; init; }
     public required DateTimeOffset ExpiresAt { get; init; }
@@ -38,10 +42,15 @@ public sealed record DeviceCommandJob
     public string? DeviceOutcome { get; init; }
     public string? DeviceError { get; init; }
     public string? LastError { get; init; }
+    public int VerificationAttempts { get; init; }
+    public DateTimeOffset? LastVerifiedAt { get; init; }
+    public string? VerificationError { get; init; }
+    public string? VerificationRelation { get; init; }
     public required JsonElement Payload { get; init; }
     public required JsonElement Metadata { get; init; }
     public JsonElement? Result { get; init; }
     [JsonIgnore] public bool IsTerminal => State is "succeeded" or "already_completed" or "failed" or "expired" or "unconfirmed";
+    [JsonIgnore] public bool RequiresDeviceAction => Source == RemoteCommand;
 }
 
 /// <summary>设备领取参数，长轮询最长等待 25 秒。</summary>

@@ -11,7 +11,7 @@ using OfficeMcp.Api.Infrastructure.Errors;
 namespace OfficeMcp.Api.Features.Attendance;
 
 /// <summary>协调远程动作与官方考勤核验，不把设备启动应用的回执当作业务成功。</summary>
-public sealed class ClockInService(DeviceCommandStore store, DingTalkClient dingTalk,
+public sealed partial class ClockInService(DeviceCommandStore store, DingTalkClient dingTalk,
     IOptions<ClockInOptions> options, IOptions<AttendanceOptions> attendance,
     IOptions<DeviceCommandOptions> devices, TimeProvider clock)
 {
@@ -87,7 +87,7 @@ public sealed class ClockInService(DeviceCommandStore store, DingTalkClient ding
     {
         EnsureEnabled();
         var job = await store.GetAsync(id, token);
-        if (job is null || job.Kind != Kind) throw new ApiRequestException(404, "task_not_found", "远程打卡任务不存在。");
+        if (job is null || job.Kind != Kind) throw new ApiRequestException(404, "task_not_found", "打卡任务不存在。");
         return await ToResponseAsync(job, token);
     }
 
@@ -108,6 +108,7 @@ public sealed class ClockInService(DeviceCommandStore store, DingTalkClient ding
     /// <summary>检查一次任务状态；领取回执不明时只读取钉钉，不重新向手机发送动作。</summary>
     public async Task ProcessAsync(DeviceCommandJob job, CancellationToken token)
     {
+        if (job.IsTerminal) return;
         var now = clock.GetUtcNow();
         if (job.State == "queued")
         {
@@ -117,7 +118,7 @@ public sealed class ClockInService(DeviceCommandStore store, DingTalkClient ding
         if (job.State == "claimed" && now < job.ClaimedAt!.Value.AddSeconds(job.ExecutionTimeoutSeconds)) return;
         if (now >= job.VerificationDeadline!.Value)
         {
-            await FinishAsync(job.Id, "unconfirmed", null, "核验期限内未能确认新的打卡记录；不要据此断言实际未打卡。", token);
+            await FinishAsync(job.Id, "unconfirmed", null, "核验期限内未能确认对应打卡记录；不要据此断言实际未打卡。", token);
             return;
         }
         await store.UpdateAsync(job.Id, current => current.IsTerminal ? current : current with { State = "verifying" }, token);
@@ -133,8 +134,28 @@ public sealed class ClockInService(DeviceCommandStore store, DingTalkClient ding
         verificationBudget.CancelAfter(remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero);
         try
         {
+            await store.UpdateAsync(job.Id, value => value.IsTerminal ? value : value with
+            {
+                VerificationAttempts = value.VerificationAttempts + 1, LastVerifiedAt = clock.GetUtcNow()
+            }, token);
             var current = await ReadSnapshotAsync(metadata.WorkDate, metadata.CheckType, verificationBudget.Token);
-            if (ConfirmsNewRecord(job, metadata.Baseline, current, clock.GetUtcNow()))
+            var relation = job.Source == DeviceCommandJob.LocalSchedule
+                ? LocalRecordRelation(job, metadata, current, clock.GetUtcNow()) : null;
+            await store.UpdateAsync(job.Id, value => value.IsTerminal ? value : value with
+            {
+                VerificationError = null, VerificationRelation = relation,
+                Result = current is null ? null : JsonSerializer.SerializeToElement(ToRecord(metadata.CheckType, current), DeviceCommandStore.JsonOptions)
+            }, token);
+            if (job.Source == DeviceCommandJob.LocalSchedule)
+            {
+                // 事后上报没有执行前基线，只确认记录与时间关系，不宣称设备动作的因果归属。
+                if (relation is "before_execution" or "within_execution_window")
+                    await FinishAsync(job.Id, relation == "before_execution" ? "already_completed" : "succeeded",
+                        ToRecord(metadata.CheckType, current!), relation == "before_execution"
+                            ? "已确认上班记录早于本次执行；本地子任务已运行，不能将此记录归因于本次动作。"
+                            : "已通过钉钉 API 确认与执行时间相符的上班记录；事后核验不证明动作的因果归属。", token);
+            }
+            else if (ConfirmsNewRecord(job, metadata.Baseline, current, clock.GetUtcNow()))
             {
                 await FinishAsync(job.Id, "succeeded", ToRecord(metadata.CheckType, current!),
                     metadata.CheckType == "OffDuty" && IsRecorded(metadata.Baseline)
@@ -152,7 +173,7 @@ public sealed class ClockInService(DeviceCommandStore store, DingTalkClient ding
             // 接口暂时不可用时继续在后台重试读取，不重复触发设备动作。
             await store.UpdateAsync(job.Id, current => current.IsTerminal ? current : current with
             {
-                LastError = $"核验暂未完成：{exception.Code}，钉钉错误码 {exception.ProviderCode ?? "无"}。"
+                VerificationError = $"核验暂未完成：{exception.Code}，钉钉错误码 {exception.ProviderCode ?? "无"}。"
             }, token);
         }
         catch (ApiRequestException exception)
@@ -190,7 +211,7 @@ public sealed class ClockInService(DeviceCommandStore store, DingTalkClient ding
         CancellationToken token) => store.UpdateAsync(id, current => current.IsTerminal ? current : current with
     {
         State = state, FinishedAt = clock.GetUtcNow(), LastError = message,
-        Result = record is null ? null : JsonSerializer.SerializeToElement(record, DeviceCommandStore.JsonOptions)
+        Result = record is null ? current.Result : JsonSerializer.SerializeToElement(record, DeviceCommandStore.JsonOptions)
     }, token);
 
     /// <summary>返回不含基线、领取令牌和完整用户 ID 的任务摘要。</summary>
@@ -200,9 +221,11 @@ public sealed class ClockInService(DeviceCommandStore store, DingTalkClient ding
         var id = metadata.UserId;
         var masked = id.Length <= 6 ? new string('*', id.Length) : id[..3] + new string('*', id.Length - 6) + id[^3..];
         return new ClockInTaskResponse(job.Id, job.State, job.IsTerminal, job.State is "succeeded" or "already_completed",
-            metadata.WorkDate, metadata.CheckType, masked, await store.IsOnlineAsync(job.DeviceId, token), job.ExpiresAt,
+            metadata.WorkDate, metadata.CheckType, masked, await store.IsOnlineAsync(job.DeviceId, token), job.RequiresDeviceAction ? job.ExpiresAt : null,
             job.DeviceOutcome, job.Result?.Deserialize<AttendanceRecord>(DeviceCommandStore.JsonOptions),
-            job.State == "already_completed" ? "已有上班打卡记录，未再次下发手机动作。" : job.LastError);
+            job.State == "already_completed" && job.RequiresDeviceAction ? "已有上班打卡记录，未再次下发手机动作。" : job.LastError ?? job.VerificationError,
+            job.Source, metadata.LocalExecution, job.CreatedAt, job.VerificationDeadline, job.FinishedAt,
+            job.VerificationAttempts, job.LastVerifiedAt, job.VerificationError, job.VerificationRelation);
     }
 
     /// <summary>未启用或未登记设备时阻止创建动作，原有考勤查询仍可继续使用。</summary>

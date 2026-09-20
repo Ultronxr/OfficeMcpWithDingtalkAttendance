@@ -52,6 +52,9 @@ var CONFIG = {
     // 确认亮屏后，请求打开 APP 前等待的毫秒数；允许 0～10000。
     openAppDelayMs: 800,
 
+    // 仅上午随机子任务接入服务端上班核验；direct、下午计划不生成核验任务。
+    verifyScheduledAttendance: true,
+
     // 日志追加到当前脚本完整路径后加 .log 的文件。
     writeLogFile: true
 };
@@ -156,21 +159,54 @@ var CONFIG = {
      * 复用设备动作，记录亮屏结果并保留执行过期状态。
      * @param {number} keepSeconds 继续保亮的秒数。
      * @param {number|null} deadline 本次计划的执行截止时间。
+     * @param {Object|null} verification 本地执行事实句柄，direct 模式不传入。
      * @returns {string} 亮屏状态，或在应用启动前到达截止时间时的 expired 状态。
      */
-    function wake(keepSeconds, deadline) {
+    function wake(keepSeconds, deadline, verification) {
         // AutoJs6 的 files 未提供 dirname，使用 Java File 解析当前入口的目录。
         var folder = String(new java.io.File(selfPath).getParent());
         var actions = require(files.join(folder, "office_device_actions.js"));
-        var result = actions.wakeAndLaunch(CONFIG, keepSeconds, deadline, report);
+        var result = actions.wakeAndLaunch(CONFIG, keepSeconds, deadline, report, verification ? function (name, time) {
+            // 核验落盘故障只记录错误，不阻断既有设备动作。
+            try { verification.queue.stage(verification.handle, name, time); }
+            catch (error) { report("VERIFY_STORAGE_ERROR：阶段保存失败，后续仅核验已保存事实。"); }
+        } : null);
+        if (verification) verification.result = result;
         if (result.error_code === "wake_failed") {
             throw new Error("请求亮屏 3 次后屏幕仍未点亮");
         }
         if (result.error_code) report("ACTION_RESULT：" + result.error_code);
         // 已亮屏但尚未拉起应用时也可能跨过截止时间，不能只记为 screen_on。
         if (result.error_code === "command_expired") return "expired";
-        // 定时计划仍只登记亮屏结果；最终打卡核验由远程任务的服务端完成。
+        // 计划继续保存原亮屏状态；考勤结果通过独立的执行标识与服务端 Task 关联。
         return result.wake_status;
+    }
+
+    /** 动作前登记本地事实；只处理上午随机计划，不在规划阶段联系服务端。 */
+    function beginVerification(p) {
+        if (CONFIG.verifyScheduledAttendance !== true || new Date(p.at).getHours() >= 12) return null;
+        try {
+            var folder = String(new java.io.File(selfPath).getParent());
+            var queue = require(files.join(folder, "office_attendance_queue.js"));
+            p.localRunId = p.localRunId || String(java.util.UUID.randomUUID()).replace(/-/g, "");
+            save();
+            var name = CONFIG.writeLogFile ? String(new java.io.File(selfPath).getName()) + ".log" : null;
+            var handle = queue.begin(p.localRunId, p.day, p.actualAt, name);
+            report("VERIFY_LOCAL：执行事实已保存，local_run_id=" + p.localRunId + "；由常驻接收器补报。");
+            return { queue: queue, handle: handle, result: { outcome: "uncertain", error_code: "action_interrupted" } };
+        } catch (error) {
+            report("VERIFY_STORAGE_ERROR：本地核验队列未能登记，请检查模块和存储权限；定时动作继续。");
+            return null;
+        }
+    }
+
+    /** 结束本次执行事实并允许接收器上报；无网络请求，不延长动作窗口。 */
+    function finishVerification(verification) {
+        if (!verification) return;
+        try {
+            verification.queue.complete(verification.handle, verification.result);
+            report("VERIFY_QUEUED：等待上报，local_run_id=" + verification.handle.entry.report.local_run_id);
+        } catch (error) { report("VERIFY_STORAGE_ERROR：最终动作结果保存失败，保留已有事实用于核验。"); }
     }
     function cancelPending() {
         var n = 0;
@@ -266,10 +302,14 @@ var CONFIG = {
             "，允许窗口=" + stamp(window.startAt) + "～" + stamp(deadline)
         );
 
+        var verification = beginVerification(p);
         if (now < window.notBefore || now > deadline) {
             p.status = "skipped";
             p.skipReason = now < window.notBefore ? "not_due" : "window_expired";
             save();
+
+            if (verification) verification.result = { outcome: "expired", error_code: p.skipReason };
+            finishVerification(verification);
 
             report(
                 "SKIP：" + (p.skipReason === "not_due" ? "尚未到计划时刻" : "已超过执行截止时间") +
@@ -279,14 +319,14 @@ var CONFIG = {
         }
 
         try {
-            p.status = wake(p.keepSeconds, deadline);
+            p.status = wake(p.keepSeconds, deadline, verification);
             save();
         } catch (e) {
             p.status = "failed";
             p.error = String(e);
             save();
             throw e;
-        }
+        } finally { finishVerification(verification); }
     }
 
     /**

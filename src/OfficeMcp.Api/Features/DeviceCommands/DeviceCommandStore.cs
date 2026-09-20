@@ -88,8 +88,10 @@ public sealed class DeviceCommandStore(IOptions<DeviceCommandOptions> options, T
             if (prior.Fingerprint != job.Fingerprint) throw new ApiRequestException(409, "request_id_conflict", "同一 request_id 不能用于不同操作。");
             return prior;
         }
-        var active = _jobs.Values.FirstOrDefault(x => x.DeviceId == job.DeviceId && !x.IsTerminal);
-        if (!job.IsTerminal && active is not null)
+        // 本地动作已经发生，必须允许登记事实；纯核验任务不占用远程动作名额。
+        // 两条远程任务之间仍沿用原保护，手机动作继续由共用文件锁互斥。
+        var active = _jobs.Values.FirstOrDefault(x => x.DeviceId == job.DeviceId && x.RequiresDeviceAction && !x.IsTerminal);
+        if (job.RequiresDeviceAction && !job.IsTerminal && active is not null)
             throw new ApiRequestException(409, "device_busy", $"设备已有未结束任务，请查询任务 {active.Id}。");
         Save(job);
         return job;
@@ -111,7 +113,8 @@ public sealed class DeviceCommandStore(IOptions<DeviceCommandOptions> options, T
     public Task<DeviceCommandJob?> LeaseAsync(string deviceId, CancellationToken token) => LockedAsync(() =>
     {
         var now = clock.GetUtcNow();
-        var job = _jobs.Values.Where(x => x.DeviceId == deviceId && x.State == "queued" && x.ExpiresAt > now)
+        var job = _jobs.Values.Where(x => x.DeviceId == deviceId && x.RequiresDeviceAction
+                && x.State == "queued" && x.ExpiresAt > now)
             .OrderBy(x => x.CreatedAt).FirstOrDefault();
         if (job is null) return null;
         job = job with

@@ -69,9 +69,10 @@ function integer(value, min, max, name) {
  * @param {number} keepSeconds 打开应用后继续保亮的秒数。
  * @param {number|null} deadline 最迟允许请求打开应用的时间戳。
  * @param {Function} report 本地日志回调，不包含任何设备密钥。
+ * @param {Function|null} stage 可选阶段回调 (name, unixMs)，用于本地事实持久化。
  * @returns {Object} 亮屏结果、启动请求结果及固定错误码。
  */
-function wakeAndLaunch(config, keepSeconds, deadline, report) {
+function wakeAndLaunch(config, keepSeconds, deadline, report, stage) {
     integer(keepSeconds, 0, 600, "keepScreenOnSeconds");
     var guard = acquire("screen-action", 30000, deadline);
     if (guard == null) {
@@ -92,6 +93,7 @@ function wakeAndLaunch(config, keepSeconds, deadline, report) {
         }
         if (!isOn) return { outcome: "failed", wake_status: "failed", error_code: "wake_failed", launch_requested: false };
         report(wasOn ? "ALREADY_ON：屏幕原本已亮。" : "SCREEN_ON：已确认屏幕点亮。");
+        if (stage) stage("screen_on", Date.now());
         var result = { outcome: "failed", wake_status: wasOn ? "already_on" : "screen_on",
             screen_on: true, launch_requested: false, error_code: null };
         var launchEnabled = config.openAppAfterWake === true;
@@ -118,9 +120,10 @@ function wakeAndLaunch(config, keepSeconds, deadline, report) {
                 } else {
                     // 沿用现有动作：不按 Home、不杀应用、不模拟点击，仅发送启动请求。
                     result.launch_requested = !!app.launchPackage(pkg);
+                    if (result.launch_requested && stage) stage("app_requested", Date.now());
                     result.outcome = result.launch_requested ? "launch_requested" : "failed";
                     if (!result.launch_requested) result.error_code = "launch_failed";
-                    report(result.launch_requested ? "APP_REQUESTED：已请求打开 " + pkg + "，等待服务端核验考勤。" : "APP_ERROR：启动请求失败。");
+                    report(result.launch_requested ? "APP_REQUESTED：已请求打开 " + pkg + "，此回执不代表实际打卡成功。" : "APP_ERROR：启动请求失败。");
                 }
             } catch (error) {
                 result.outcome = "failed";

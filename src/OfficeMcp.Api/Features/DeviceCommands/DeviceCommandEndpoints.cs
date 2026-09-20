@@ -42,7 +42,30 @@ public static class DeviceCommandEndpoints
             .RequireAuthorization(DeviceAuthenticationHandler.PolicyName);
         group.MapPost("/lease", LeaseAsync).ExcludeFromDescription();
         group.MapPost("/{taskId}/report", ReportAsync).ExcludeFromDescription();
+        var attendance = endpoints.MapGroup("/api/devices/{deviceId}/attendance")
+            .RequireAuthorization(DeviceAuthenticationHandler.PolicyName);
+        attendance.MapPost("/executions", ReportLocalAsync).ExcludeFromDescription();
+        attendance.MapGet("/tasks/{taskId}", GetDeviceTaskAsync).ExcludeFromDescription();
         return endpoints;
+    }
+
+    /// <summary>设备上报已发生的本地执行，只登记核验任务，不生成可领取的动作。</summary>
+    private static async Task<Ok<ClockInTaskResponse>> ReportLocalAsync(string deviceId,
+        [FromBody] ScheduledClockInReport report, HttpContext context, ClockInService service,
+        DeviceCommandStore store, CancellationToken token)
+    {
+        CheckDevice(context, deviceId);
+        await store.TouchAsync(deviceId, token);
+        return TypedResults.Ok(await service.ReportLocalAsync(deviceId, report, token));
+    }
+
+    /// <summary>常驻接收器拉取本设备最终结果，用于写回手机日志。</summary>
+    private static async Task<Ok<ClockInTaskResponse>> GetDeviceTaskAsync(string deviceId, string taskId,
+        HttpContext context, ClockInService service, DeviceCommandStore store, CancellationToken token)
+    {
+        CheckDevice(context, deviceId);
+        await store.TouchAsync(deviceId, token);
+        return TypedResults.Ok(await service.GetDeviceTaskAsync(deviceId, taskId, token));
     }
 
     /// <summary>长轮询领取一条命令；没有任务返回 204，已领取任务不会重发。</summary>

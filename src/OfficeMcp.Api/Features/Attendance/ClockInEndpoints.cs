@@ -17,8 +17,8 @@ public static class ClockInEndpoints
             .WithDescription("仅在用户明确要求实际打卡时调用。手机亮屏并拉起钉钉，依赖已配置的自动打卡。check_type 为 OnDuty 或 OffDuty；上班已有记录时不重发，下班需核验时间更新。request_id 为 UUID，重试同一操作必须复用。默认等待45秒，未完成返回task_id，后台继续核验；只有attendance_confirmed=true才确认有记录。")
             .ProducesProblem(400).ProducesProblem(401).ProducesProblem(409).ProducesProblem(502).ProducesProblem(503).ProducesProblem(504);
         group.MapGet("/attendance/clock-in/{task_id}", GetAsync).WithName("attendance_clock_in_status").WithTags("Attendance")
-            .WithSummary("查询远程打卡任务结果")
-            .WithDescription("按 task_id 查询已创建任务，不产生新的手机动作。结果未确认时不要重新创建重复任务。")
+            .WithSummary("查询远程或本地定时打卡任务结果")
+            .WithDescription("按 task_id 查询已创建任务，不产生新的手机动作。source 区分远程命令和本地定时；local_execution 保存本地执行时间。attendance_confirmed 只表示官方记录已确认，verification_relation 表示记录与执行时间的关系，不证明动作因果。结果未确认时不要重新创建重复任务。")
             .ProducesProblem(401).ProducesProblem(404).ProducesProblem(503);
         return group;
     }
