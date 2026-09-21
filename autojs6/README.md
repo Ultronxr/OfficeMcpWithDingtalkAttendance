@@ -10,16 +10,21 @@
 | [office_device_actions.js](office_device_actions.js) | 两种入口共用的设备动作、文件锁和截止时间检查 |
 | [office_remote_listener.js](office_remote_listener.js) | 常驻接收器：领取远程命令、持久化去重、执行动作、回传结果 |
 | [office_attendance_queue.js](office_attendance_queue.js) | 本地执行事实持久化、补报、取回核验结果及写回入口日志 |
+| [office_automation_control.js](office_automation_control.js) | 被动打卡开关持久化、同步确认、取消待执行子任务与执行门禁 |
 | `remote-config.local.json` | 远程连接地址、设备凭据和动作参数 |
 
 ```mermaid
 flowchart TD
-    A[AutoJs6 主任务] --> B[随机登记一次性子任务后退出]
+    A[AutoJs6 主任务] --> P{本地自动打卡开关开启?}
+    P -->|是| B[随机登记一次性子任务后退出]
+    P -->|否| S[记录跳过并退出]
     B --> C[子任务到点触发，检查计划和窗口]
     D[Agent 调用 MCP 打卡工具] --> E[mcp-gateway 转发给 office-mcp]
     E --> F[服务端创建带有效期的设备命令]
     F --> G[手机常驻接收器通过 HTTP 长轮询领取]
-    C --> H[共用设备锁、亮屏和打开钉钉]
+    C --> Q{执行门禁仍开启?}
+    Q -->|是| H[共用设备锁、亮屏和打开钉钉]
+    Q -->|否| S
     G --> H
     H --> I[钉钉按自身规则自动打卡]
     H -->|远程回执／本地执行事实| J[常驻接收器上传]
@@ -28,7 +33,28 @@ flowchart TD
     L -->|本地定时结果| M[接收器写回手机入口日志]
 ```
 
-MCP 接口由网关提供，手机通过 HTTP 主动领取命令，不需要开放监听端口。本地定时动作独立运行；上午随机子任务执行后也会由常驻接收器上报，进入同一套 Task 核验。断网或接收器停止时，动作仍按原窗口执行，事实保留在手机等待当天恢复补报；上报和结果回写需要常驻接收器运行。
+MCP 接口由网关提供，手机通过 HTTP 主动领取命令，不需要开放监听端口。本地定时动作独立运行；上午随机子任务执行后也会由常驻接收器上报，进入同一套 Task 核验。断网或接收器停止时，定时脚本沿用手机最后保存的自动打卡开关：开启则按原窗口执行，关闭则跳过。事实保留在手机等待当天恢复补报；开关同步、上报和结果回写需要常驻接收器运行。
+
+## 远程开关被动自动打卡
+
+请假前调用 `attendance_automation_set`，显式传入 `enabled: false`；返岗前以新的 `request_id` 调用 `enabled: true`。`request_id` 为带连字符的 UUID，同一次设置重试必须复用；本接口没有容易因重试翻转状态的 toggle 操作。`wait_seconds` 默认 45，允许 0～60 秒。
+
+| 字段／结果 | 含义 |
+|---|---|
+| `desired_enabled`、`revision` | 服务端已保存的期望开关和版本 |
+| `applied_enabled`、`applied_revision`、`applied_at` | 手机最后确认已保存的状态、版本及服务端收到确认的时间，未确认时为 null |
+| `sync_state=applied` | 手机已确认当前服务端版本，可以说明当前设置已在手机应用 |
+| `sync_state=pending`／HTTP 202 | 仍待同步；用只读 `attendance_automation_status` 查询，不需要重新设置 |
+| `request_revision`、`request_superseded` | 本次请求对应版本，以及它是否已被后续设置覆盖；旧请求重传不会撤销新设置 |
+| `device_online` | 最近 60 秒是否连接服务端；在线与已应用开关是不同状态 |
+
+关闭会禁止后续随机规划，并取消固定入口 `autojs6_autowake.js` 已登记但尚未执行的子任务。AutoJs6 的周期主任务继续保留，到点只记录 `AUTOMATION_DISABLED` 并退出。开启仅保存开关，等下一次原定主任务触发时恢复；不立即亮屏、不重新随机、不补建当天计划。原有日期、星期、随机窗口及 `CONFIG.enabled` 上层开关保持不变。手动 `direct` 和 MCP 主动打卡不受远程开关影响，已开始动作和后续核验仍会完成。
+
+常驻接收器每轮先通过设备认证同步开关，通常受原最长 25 秒领取轮询影响；有设备动作、网络或存储问题时可能更久，不能把 HTTP 已保存当作手机已关闭。同步失败不会停止原主动命令和考勤事实回报。**手机断网期间继续沿用上一次已保存的状态，因此请假前应确认 `desired_enabled=false` 且 `sync_state=applied`。**
+
+手机状态存于 `.office-mcp/automation.json`，使用 Android 原子文件；规划、子任务执行和策略应用共用 `.office-mcp/automation-control.lock`。锁覆盖已开始的动作，关闭必须等其结束才能确认，不能撤销已经发生的亮屏或打卡。若离线期间服务端先关闭又开启，`last_disabled_revision` 仍会让关闭前的旧计划失效。文件损坏、模块缺失或锁获取失败会停止随机入口并记日志；首次安装确实无本地状态时兼容原默认开启行为。
+
+`AUTOMATION_APPLIED` 记录手机保存的版本、开关及取消数量；`AUTOMATION_SYNC_PENDING` 表示同步异常；`AUTOMATION_BUSY` 表示本次入口未取得门禁。服务端动态状态及幂等记录保存在 `RemoteDevices:StateDirectory/automation/state.json`，部署时与原 Task 数据一起保留。不要在请假期间删除控制文件或回滚到不含门禁的旧手机脚本。
 
 ## 本地定时逻辑
 
@@ -159,7 +185,7 @@ Agent 通过 `attendance_clock_in` 创建远程任务，同一操作重试复用
 
 `device_key` 对应服务端设备凭据，不使用网关 API Key 或钉钉应用密钥。示例中的 192.0.2.10 是文档占位地址，需改为手机经 ZeroTier 等私有网络可访问的实际服务地址；远程保亮参数允许 0～30 秒，打开前等待允许 0～10000ms。
 
-启用远程功能及本地核验时运行一次 `office_remote_listener.js` 并保持常驻，共用动作和队列模块不需要单独运行。升级时先发布含本地上报接口的后端，再将四个 `.js` 文件更新到实际入口目录，保留配置、已登记计划和 `.office-mcp`；停止旧接收器再启动，已运行实例不会热更新。不得通过手动运行定时入口来验收网络链路，以免触发设备动作。设备需具备无需人工解锁即可打开钉钉的条件，并保持 AutoJs6、ZeroTier 和钉钉所需的后台及网络能力。
+启用远程功能、本地核验和远程开关时运行一次 `office_remote_listener.js` 并保持常驻，共用动作、队列和控制模块不需要单独运行。升级时先发布含本地上报及开关同步接口的后端，再将五个 `.js` 文件更新到实际入口目录，保留配置、已登记计划和 `.office-mcp`；确认原定时入口没有正在执行，停止旧接收器后更新并启动新版，已运行实例不会热更新。新增模块应先于依赖它的入口更新。不得通过手动运行定时入口来验收网络链路，以免触发设备动作。设备需具备无需人工解锁即可打开钉钉的条件，并保持 AutoJs6、ZeroTier 和钉钉所需的后台及网络能力。
 
 后端与网关的部署说明见 [服务器部署说明](../docs/deployment.md)；本目录仅维护手机实现与配置说明。
 

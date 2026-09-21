@@ -4,6 +4,8 @@
 
 AutoJs6 远程打卡与上午本地定时打卡共用持久化 Task 和钉钉 API 核验。定时动作后由常驻接收器上报执行事实、取回结果并写入手机日志，断网只补传事实，不重做动作。手机部署见 [定时与远程打卡说明](autojs6/README.md)，当前部署和运维见 [部署说明](docs/deployment.md)。
 
+被动自动打卡支持远程开关：`attendance_automation_set` 对应 `POST /api/attendance/automation`，显式传 `enabled`、UUID `request_id`，可选 `wait_seconds`（默认 45）。`attendance_automation_status` 对应同路径 GET。关闭禁止新规划并取消待执行子任务；开启从下一次原定主任务恢复，不补建当天计划，主动打卡和已发生动作的核验不受影响。手机断网沿用本地最后状态，只有 `sync_state=applied` 才代表当前 `desired_enabled` 已在手机生效；HTTP 202 表示仍待同步。规则与持久化边界见 [开发目标](docs/scheduled-clock-in-control-prd.md)。
+
 ## 部署方式
 
 - Linux 示例服务目录为 `/opt/office-mcp`，服务名为 `office-mcp.service`，按实际环境调整。
@@ -249,7 +251,7 @@ Invoke-RestMethod http://127.0.0.1:18101/healthz
 
 升级已有接入时，OpenAPI 方式需要让网关重新读取在线服务文档，并将 `attendance_overtime` 加入既有白名单（尚未接入员工工具时同时加入 `employee_list`）；手工 HTTP 方式需同步工具定义。两份网关示例的 HTTP 超时为 150 秒，高于服务默认的 120 秒整次查询限制。如调整服务超时或日期上限，请同步更新网关配置和工具说明。此处配置示例不会自动修改线上网关。
 
-远程打卡为 `attendance_clock_in`（POST）与 `attendance_clock_in_status`（GET）；仍使用配置的固定员工，通过 `/topapi/attendance/getupdatedata` 核验，不随动态查询员工改变。其启用、设备配对和调用语义见远程打卡说明。网关使用 `methods: [GET, POST]`，`include_operations` 包含这两个 operationId、`attendance_query`、`attendance_overtime` 和 `employee_list`。仅发布办公服务或刷新客户端不会修改旧白名单。设备领取／回执接口使用独立认证，不作为 Agent 工具导入。
+远程打卡为 `attendance_clock_in`（POST）与 `attendance_clock_in_status`（GET）；仍使用配置的固定员工，通过 `/topapi/attendance/getupdatedata` 核验，不随动态查询员工改变。其启用、设备配对和调用语义见远程打卡说明。网关使用 `methods: [GET, POST]`，`include_operations` 包含这两个 operationId、`attendance_query`、`attendance_overtime`、`employee_list`、`attendance_automation_set` 和 `attendance_automation_status`，共七个工具。仅发布办公服务或刷新客户端不会修改旧白名单。设备领取／回执／开关同步接口使用独立认证，不作为 Agent 工具导入。
 
 ## 验证
 

@@ -46,7 +46,19 @@ public static class DeviceCommandEndpoints
             .RequireAuthorization(DeviceAuthenticationHandler.PolicyName);
         attendance.MapPost("/executions", ReportLocalAsync).ExcludeFromDescription();
         attendance.MapGet("/tasks/{taskId}", GetDeviceTaskAsync).ExcludeFromDescription();
+        attendance.MapPost("/automation/sync", SyncAutomationAsync).ExcludeFromDescription();
         return endpoints;
+    }
+
+    /// <summary>固定手机同步自动打卡策略；确认只表示本地开关已落盘，不代表考勤成功。</summary>
+    private static async Task<Ok<AutomationPolicy>> SyncAutomationAsync(string deviceId,
+        [FromBody] AutomationSyncRequest request, HttpContext context, AutomationStore automation,
+        DeviceCommandStore devices, CancellationToken token)
+    {
+        CheckDevice(context, deviceId);
+        var result = await automation.SyncAsync(deviceId, request, token);
+        await devices.TouchAsync(deviceId, token);
+        return TypedResults.Ok(result);
     }
 
     /// <summary>设备上报已发生的本地执行，只登记核验任务，不生成可领取的动作。</summary>

@@ -35,3 +35,18 @@ X-Api-Key: {{officeApiKey}}
 ### 按员工查询加班日全部原始打卡明细（ID为合成示例）
 GET {{baseUrl}}/api/attendance/overtime?start_date=2026-09-01&end_date=2026-09-14&user_id=test-user-000001&detail=full
 X-Api-Key: {{officeApiKey}}
+
+### 查询被动自动打卡开关（请假前后先确认手机生效状态）
+GET {{baseUrl}}/api/attendance/automation
+X-Api-Key: {{officeApiKey}}
+
+### 关闭被动自动打卡；每次新操作使用新 UUID，同一操作重试复用
+POST {{baseUrl}}/api/attendance/automation
+X-Api-Key: {{officeApiKey}}
+Content-Type: application/json
+
+{
+  "request_id": "{{$uuid}}",
+  "enabled": false,
+  "wait_seconds": 45
+}

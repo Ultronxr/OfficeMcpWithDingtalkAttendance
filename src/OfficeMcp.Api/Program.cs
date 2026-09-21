@@ -24,6 +24,7 @@ public partial class Program
         builder.Services.AddAttendanceFeature(builder.Configuration);
         builder.Services.AddEmployeeFeature();
         builder.Services.AddRemoteCommands(builder.Configuration);
+        builder.Services.AddAutomationControl();
 
         var app = builder.Build();
         app.UseExceptionHandler();
@@ -37,7 +38,7 @@ public partial class Program
         });
         app.MapHealthChecks("/healthz").AllowAnonymous();
         app.MapOfficeOpenApi();
-        app.MapGroup("/api").RequireAuthorization().MapAttendanceEndpoints().MapClockInEndpoints().MapEmployeeEndpoints();
+        app.MapGroup("/api").RequireAuthorization().MapAttendanceEndpoints().MapClockInEndpoints().MapAutomationEndpoints().MapEmployeeEndpoints();
         app.MapDeviceCommands();
         app.Run();
     }

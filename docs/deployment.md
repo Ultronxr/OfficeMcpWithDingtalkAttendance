@@ -12,6 +12,8 @@
 
 升级前停止服务，替换程序时保留已有 `appsettings.Local.json` 和 `data/device-commands`，再启动服务。同一状态目录只允许一个后端实例使用。`/healthz` 仅验证进程存活，不证明钉钉接口或手机在线。
 
+远程开关状态及请求去重记录位于 `data/device-commands/automation/state.json`（自定义 `RemoteDevices:StateDirectory` 时随其移动），必须连同原任务一起保留。开关首版部署需更新后端、网关两个新 operationId，以及手机控制模块／定时入口／常驻接收器。新版接收器确认后，`attendance_automation_status` 才会显示 `sync_state=applied`；旧接收器在线不能代替控制版本确认。手机端须先部署模块、再更新入口，确认旧定时引擎已退出并重启接收器；默认初始化开启，不用真实关闭／开启测试代替只读验收。
+
 升级前确认默认员工 `Attendance:UserId` 已填写在 `appsettings.Local.json` 中。旧部署如将真实 ID 放在 `appsettings.json`，应原样迁入私密配置后再替换程序；发布包的基础配置只保留空占位值。
 
 ## 手机与网关

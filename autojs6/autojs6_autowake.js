@@ -63,6 +63,7 @@ var CONFIG = {
     var selfPath = files.path(String(engines.myEngine().getSource()));
     var store;
     var state;
+    var automationGuard = null;
 
     function pad(n) {
         return n < 10 ? "0" + n : String(n);
@@ -507,7 +508,20 @@ var CONFIG = {
             "keepScreenOnSeconds"
         );
 
-        // 保留原来的存储名称，兼容之前已经登记的计划。
+        // 规划、随机子任务与远程开关应用共用门禁；手动 direct 不受远程开关影响。
+        // 对已登记子任务即使后来改为 direct 也保留检查，避免绕过关闭状态。
+        var id = taskId();
+        if (CONFIG.mode !== "direct" || id >= 0) {
+            var folder = String(new java.io.File(selfPath).getParent());
+            var automation = require(files.join(folder, "office_automation_control.js"));
+            automationGuard = automation.enter();
+            if (!automationGuard) {
+                report("AUTOMATION_BUSY：控制状态正在同步，本次自动任务停止。");
+                return;
+            }
+        }
+
+        // 保留原来的存储名称，兼容之前已经登记的计划；必须在控制锁内读取，防止覆盖刚取消的计划。
         store = storages.create("autojs6.screen_wake.v1");
         state = store.get(selfPath, { plans: [] });
 
@@ -520,12 +534,19 @@ var CONFIG = {
             return;
         }
 
+        if (automationGuard && automationGuard.policy && !automationGuard.policy.enabled) {
+            report("AUTOMATION_DISABLED：被动自动打卡已关闭，revision=" + automationGuard.policy.revision +
+                "；不规划、不亮屏、不打开钉钉。主动打卡仍可使用。");
+            return;
+        }
+
         // 优先识别已登记的随机子任务。
         // 避免把子任务再次当作规划任务。
-        var id = taskId();
-
+        var liveTask = id >= 0 ? tasks.getTimedTask(id) : null;
         for (var i = state.plans.length - 1; i >= 0; i--) {
-            if (id >= 0 && state.plans[i].id === id) {
+            // 已移除的一次性任务可能仍收到回调；有现存任务时同时核对类型和时刻，避免旧 ID 遮蔽周期主任务。
+            if (id >= 0 && state.plans[i].id === id && (!liveTask ||
+                (liveTask.isDisposable() && Number(liveTask.getMillis()) === state.plans[i].at))) {
                 executePlan(state.plans[i]);
                 return;
             }
@@ -539,5 +560,7 @@ var CONFIG = {
     } catch (e) {
         // 记录错误，不主动弹出错误界面干扰目标 APP。
         reportException("ERROR", e);
+    } finally {
+        if (automationGuard) automationGuard.release();
     }
 })();

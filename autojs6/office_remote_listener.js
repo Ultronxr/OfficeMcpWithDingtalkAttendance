@@ -1,6 +1,6 @@
 /*
  * AutoJs6 常驻远程接收器。普通脚本，不需要 ui、无障碍选择器或模拟点击。
- * 将本文件、office_device_actions.js、office_attendance_queue.js 和 remote-config.local.json 放在同一目录。
+ * 将本文件、office_device_actions.js、office_attendance_queue.js、office_automation_control.js 和 remote-config.local.json 放在同一目录。
  * 只执行服务端固定的 wake_dingtalk 动作，不执行远程传入的脚本或路径。
  */
 (function () {
@@ -9,6 +9,7 @@
     var folder = String(new java.io.File(selfPath).getParent());
     var actions = require(files.join(folder, "office_device_actions.js"));
     var attendanceQueue = null;
+    var automationControl = null;
     var listenerLock = null;
     var config;
     var store;
@@ -159,11 +160,26 @@
         store = storages.create("office-mcp.remote.v1." + config.device_id);
         try { attendanceQueue = require(files.join(folder, "office_attendance_queue.js")); }
         catch (error) { report("本地考勤核验模块未加载，请检查 office_attendance_queue.js；远程接收继续运行。"); }
+        try { automationControl = require(files.join(folder, "office_automation_control.js")); }
+        catch (error) { report("自动打卡开关模块未加载，请检查 office_automation_control.js；远程接收继续运行。"); }
         report("远程接收器已启动，正在连接服务端；保留原来的定时任务。");
         var failures = 0;
         var hasConnected = false;
+        var automationFailed = false;
         while (!stopRequested()) {
             try {
+                // 开关同步独立于回执是否成功，防止待重传回执使关闭指令长期无法生效。
+                // 单次短请求失败不阻断既有主动动作和本地核验；连续故障只记录一次直到恢复。
+                if (automationControl) {
+                    try {
+                        automationControl.sync(attendanceRequest, config.device_id);
+                        if (automationFailed) report("AUTOMATION_SYNC_RECOVERED：自动打卡开关同步已恢复。");
+                        automationFailed = false;
+                    } catch (error) {
+                        if (!automationFailed) report("AUTOMATION_SYNC_PENDING：开关暂未同步，保留手机上次状态；请查询服务端确认状态。");
+                        automationFailed = true;
+                    }
+                }
                 var pending = store.get("pending_receipt", null);
                 if (pending != null && !sendReceipt(pending)) { sleep(5000); continue; }
                 // 远程回执始终优先；每轮最多一个本地上报／结果查询，绝不在队列中重做动作。

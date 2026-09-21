@@ -11,6 +11,7 @@ const scriptFolder = path.posix.dirname(scriptPath);
 const entrySource = fs.readFileSync(path.resolve(__dirname, '../../autojs6/autojs6_autowake.js'), 'utf8');
 const actionsSource = fs.readFileSync(path.resolve(__dirname, '../../autojs6/office_device_actions.js'), 'utf8');
 const queueSource = fs.readFileSync(path.resolve(__dirname, '../../autojs6/office_attendance_queue.js'), 'utf8');
+const controlSource = fs.readFileSync(path.resolve(__dirname, '../../autojs6/office_automation_control.js'), 'utf8');
 const bodyOffset = entrySource.indexOf('(function () {');
 
 /** 将测试用的本地时间转换为固定日期时间戳，避免运行日期影响结果。 */
@@ -36,6 +37,7 @@ function run(options = {}) {
     const memoryFiles = new Map(options.files || []);
     let loadedActions;
     let loadedQueue;
+    let loadedControl;
     let nextUuid = 1;
     const logs = [];
     const created = [];
@@ -45,11 +47,14 @@ function run(options = {}) {
     let nextTaskId = 100;
 
     /** 构造定时任务只读外观，配合真实入口的回读与取消逻辑。 */
-    function taskRecord(id) { return { getId: () => id, getScriptPath: () => scriptPath }; }
-    for (const value of state.plans) {
-        if (value.status === 'pending') taskMap.set(value.id, taskRecord(value.id));
+    function taskRecord(id, time = 0, disposable = true, target = scriptPath) {
+        return { getId: () => id, getScriptPath: () => target, getMillis: () => time, isDisposable: () => disposable };
     }
-    for (const id of options.extraTaskIds || []) taskMap.set(id, taskRecord(id));
+    for (const value of state.plans) {
+        if (value.status === 'pending') taskMap.set(value.id, taskRecord(value.id, value.at));
+    }
+    for (const id of options.extraTaskIds || []) taskMap.set(id, taskRecord(id, 0, false));
+    for (const task of options.reusedTasks || []) taskMap.set(task.id, taskRecord(task.id, task.at, task.disposable, task.path));
 
     class ClockDate extends Date {
         /** 默认构造与 Date.now 共用虚拟时钟；显式日期仍使用原生解析。 */
@@ -74,7 +79,8 @@ function run(options = {}) {
     /** 模拟 Android AtomicFile 的成功提交和失败回滚，用于持久化恢复测试。 */
     function AtomicFile(file) {
         this.startWrite = () => {
-            if (options.failQueueWrites) throw new Error('模拟存储故障');
+            if (options.failQueueWrites || (options.failControlWrites && file.path.endsWith('/automation.json')))
+                throw new Error('模拟存储故障');
             return { value: '', write(value) { this.value = String(value); } };
         };
         this.finishWrite = output => { memoryFiles.set(file.path, output.value); };
@@ -92,7 +98,8 @@ function run(options = {}) {
         this.getChannel = () => ({
             close() {},
             tryLock() {
-                if (locks.has(key) || (key.endsWith('/screen-action.lock') && clock < (options.lockBusyUntil ?? 0))) return null;
+                if (locks.has(key) || (key.endsWith('/screen-action.lock') && clock < (options.lockBusyUntil ?? 0)) ||
+                    (key.endsWith('/automation-control.lock') && options.controlBusy)) return null;
                 locks.add(key);
                 return { release() { locks.delete(key); } };
             }
@@ -107,7 +114,7 @@ function run(options = {}) {
         sleep: milliseconds => { clock += milliseconds; },
         events: { on() {} },
         files: { path: value => value, join: (...values) => path.posix.join(...values),
-            exists: () => true, append(name, text) { memoryFiles.set(name, (memoryFiles.get(name) || '') + text); },
+            exists: name => name === scriptPath || memoryFiles.has(name), append(name, text) { memoryFiles.set(name, (memoryFiles.get(name) || '') + text); },
             listDir: directory => [...memoryFiles.keys()].filter(name => path.posix.dirname(name) === directory).map(name => path.posix.basename(name)) },
         java: { io: { File: JavaFile, RandomAccessFile }, lang: { String: JavaString },
             util: { UUID: { randomUUID: () => (nextUuid++).toString(16).padStart(32, '0') } } },
@@ -121,27 +128,40 @@ function run(options = {}) {
             cancelKeepingAwake() { calls.cancelKeep.push(clock); }
         },
         app: { getPackageName: () => 'com.alibaba.android.rimet',
-            launchPackage() { calls.launch.push(clock); return true; } },
+            launchPackage() { calls.launch.push(clock); if (options.onLaunch) options.onLaunch(loadedControl); return true; } },
         storages: { create(name) {
             assert.equal(name, 'autojs6.screen_wake.v1');
             return {
                 get(key) { assert.equal(key, scriptPath); return structuredClone(state); },
-                put(key, value) { assert.equal(key, scriptPath); state = structuredClone(value); }
+                put(key, value) {
+                    assert.equal(key, scriptPath);
+                    if (options.failPlanWrites) throw new Error('模拟计划保存失败');
+                    state = structuredClone(value);
+                }
             };
         } },
         tasks: {
             addDisposableTask(request) {
                 created.push({ ...request });
-                const record = taskRecord(nextTaskId++);
+                const record = taskRecord(nextTaskId++, request.date);
                 taskMap.set(record.getId(), record);
                 return record;
             },
             getTimedTask: id => taskMap.get(id),
-            removeTimedTask(id) { removed.push(id); return taskMap.delete(id); }
+            removeTimedTask(id) { removed.push(id); return options.failTaskRemoval ? false : taskMap.delete(id); }
         }
     };
     const context = vm.createContext({ ...api });
     context.require = requested => {
+        if (requested === path.posix.join(scriptFolder, 'office_automation_control.js')) {
+            if (options.missingControl) throw new Error('模拟控制模块未部署');
+            if (!loadedControl) {
+                const moduleContext = { ...api, require: context.require, module: { exports: {} } };
+                vm.runInNewContext(controlSource, moduleContext, { timeout: 1000 });
+                loadedControl = moduleContext.module.exports;
+            }
+            return loadedControl;
+        }
         if (requested === path.posix.join(scriptFolder, 'office_attendance_queue.js')) {
             if (!loadedQueue) {
                 const moduleContext = { ...api, require: context.require, module: { exports: {} } };
@@ -165,7 +185,9 @@ function run(options = {}) {
     vm.runInContext(entrySource.slice(bodyOffset), context, { timeout: 1000 });
     return { state, logs, created, calls, removed, taskMap, clock, fileLocked: locks.size > 0,
         files: memoryFiles, queue: loadedQueue, advance(milliseconds) { clock += milliseconds; },
-        getQueue: () => context.require(path.posix.join(scriptFolder, 'office_attendance_queue.js')) };
+        getQueue: () => context.require(path.posix.join(scriptFolder, 'office_attendance_queue.js')),
+        getControl: () => context.require(path.posix.join(scriptFolder, 'office_automation_control.js')),
+        getState: () => structuredClone(state) };
 }
 
 test('随机登记包含 start 和 end−5分钟，实际窗口完整保存', () => {
@@ -459,4 +481,172 @@ test('下午、direct 与显式关闭核验时不生成本地 Task 事实', () =
         assert.equal(result.calls.launch.length, 1);
         assert.equal(queueEntries(result).length, 0);
     }
+});
+
+/** 构造远程开关协议与原子文件，用合成设备身份运行真实控制模块。 */
+function policy(enabled, revision, lastDisabled = enabled ? 0 : revision) {
+    return { device_id: 'office-phone', enabled, revision, last_disabled_revision: lastDisabled };
+}
+/** 创建固定入口的本地开关文件；文件内容与生产模块实际读取格式一致。 */
+function controlFiles(value) {
+    return [[path.posix.join(scriptFolder, '.office-mcp/automation.json'), JSON.stringify({ version: 1, ...value })]];
+}
+
+test('关闭后主任务不规划、既有子任务不动作，也不生成未发生动作的核验事实', () => {
+    for (const options of [{}, { plans: [plan()], taskId: 16, now: at('08:40:00') }]) {
+        const result = run({ ...options, files: controlFiles(policy(false, 1)) });
+        assert.equal(result.created.length, 0);
+        assert.equal(result.calls.launch.length, 0);
+        assert.equal(queueEntries(result).length, 0);
+        assert.ok(result.logs.some(line => line.includes('AUTOMATION_DISABLED')));
+        assert.equal(result.fileLocked, false);
+    }
+});
+
+test('同步关闭取消待执行子任务，保留主任务和历史记录；确认晚于取消和落盘', () => {
+    const result = run({ plans: [plan(), plan({ id: 14, status: 'screen_on' })], extraTaskIds: [20] });
+    const bodies = [];
+    result.getControl().sync((method, url, body) => {
+        bodies.push(structuredClone(body));
+        if (bodies.length === 2) {
+            assert.equal(result.getState().plans[0].status, 'cancelled');
+            assert.equal(result.taskMap.has(16), false);
+            assert.equal(JSON.parse(result.files.get(controlFiles({})[0][0])).enabled, false);
+        }
+        return policy(false, 1);
+    }, 'office-phone');
+    assert.deepEqual(bodies, [{ applied_revision: null, applied_enabled: null }, { applied_revision: 1, applied_enabled: false }]);
+    assert.deepEqual(result.removed, [16]);
+    assert.equal(result.taskMap.has(20), true);
+    assert.equal(result.getState().plans[1].status, 'screen_on');
+    assert.equal(result.getState().plans[0].cancelReason, 'automation_disabled');
+    assert.equal(result.calls.launch.length, 0);
+});
+
+test('离线期间关闭又开启，最新策略仍取消旧计划；恢复开关不主动补建', () => {
+    const result = run({ plans: [plan()], files: controlFiles(policy(true, 0)), extraTaskIds: [20] });
+    result.getControl().sync(() => policy(true, 2, 1), 'office-phone');
+    assert.equal(result.getState().plans[0].status, 'cancelled');
+    assert.equal(result.created.length, 0);
+    assert.equal(result.calls.launch.length, 0);
+    const callback = run({ plans: result.getState().plans, files: result.files, taskId: 16, now: at('08:40:00') });
+    assert.equal(callback.calls.launch.length, 0);
+    assert.equal(callback.created.length, 0);
+    // 次日原定主任务再次进入时才恢复原随机登记逻辑。
+    const nextDay = run({ plans: result.getState().plans, files: result.files, now: at('08:30:00') + 86400000 });
+    assert.equal(nextDay.created.length, 1);
+    assert.equal(nextDay.created[0].date, at('08:40:00') + 86400000);
+});
+
+test('网络故障沿用最后开关，关闭状态跨引擎恢复，不阻止手动 direct', () => {
+    const result = run({ files: controlFiles(policy(false, 1)) });
+    assert.throws(() => result.getControl().sync(() => { throw new Error('离线'); }, 'office-phone'));
+    const restored = run({ files: result.files });
+    assert.equal(restored.created.length, 0);
+    const manual = run({ files: result.files, config: { mode: 'direct' } });
+    assert.equal(manual.calls.launch.length, 1);
+    assert.equal(queueEntries(manual).length, 0);
+});
+
+test('正在执行的子任务持有门禁，关闭不得提前确认，动作完成后可同步关闭', () => {
+    let during = 0;
+    const result = run({ plans: [plan()], taskId: 16, now: at('08:40:00'), onLaunch(control) {
+        control.sync(() => { during++; return policy(false, 1); }, 'office-phone');
+    } });
+    assert.equal(during, 0);
+    assert.equal(result.calls.launch.length, 1);
+    const acknowledgements = [];
+    result.getControl().sync((method, url, body) => { acknowledgements.push(body); return policy(false, 1); }, 'office-phone');
+    assert.equal(acknowledgements[1].applied_revision, 1);
+    assert.equal(queueEntries(result).length, 1);
+});
+
+test('损坏、缺失模块或门禁忙时自动任务停止，不能默认开启；安装首次无状态保持原行为', () => {
+    for (const options of [
+        { files: [[controlFiles({})[0][0], '{broken']] },
+        { files: controlFiles({ revision: 1, enabled: false }) },
+        { missingControl: true }, { controlBusy: true }
+    ]) {
+        const result = run(options);
+        assert.equal(result.calls.launch.length, 0);
+        assert.equal(result.created.length, 0);
+        assert.equal(result.fileLocked, false);
+    }
+    assert.equal(run().created.length, 1);
+    assert.equal(run({ missingControl: true, config: { mode: 'direct' } }).calls.launch.length, 1);
+});
+
+test('确认响应丢失后只重传已保存版本，拒绝服务器回退或同版本冲突', () => {
+    const result = run({ plans: [plan()] });
+    let calls = 0;
+    assert.throws(() => result.getControl().sync(() => {
+        if (++calls === 2) throw new Error('确认响应丢失');
+        return policy(false, 1);
+    }, 'office-phone'));
+    const restored = run({ plans: result.getState().plans, files: result.files });
+    calls = 0;
+    restored.getControl().sync((method, url, body) => {
+        calls++;
+        assert.equal(body.applied_revision, 1);
+        return policy(false, 1);
+    }, 'office-phone');
+    assert.equal(calls, 1);
+    assert.equal(restored.removed.length, 0);
+    for (const invalid of [policy(true, 0), policy(true, 1, 1), policy(false, 2, 1), policy('false', 2)]) {
+        assert.throws(() => restored.getControl().sync(() => invalid, 'office-phone'));
+    }
+    assert.equal(JSON.parse(restored.files.get(controlFiles({})[0][0])).enabled, false);
+});
+
+test('历史 ID 被周期主任务或其他计划复用时不误删，开启后周期主任务仍可规划', () => {
+    for (const reused of [
+        { id: 16, at: 0, disposable: false },
+        { id: 16, at: at('09:00:00'), disposable: true },
+        { id: 16, at: at('08:40:00'), disposable: true, path: '/scripts/other.js' }
+    ]) {
+        const result = run({ plans: [plan()], reusedTasks: [reused] });
+        result.getControl().sync(() => policy(false, 1), 'office-phone');
+        assert.equal(result.taskMap.has(16), true);
+        assert.equal(result.removed.length, 0);
+        assert.equal(result.getState().plans[0].status, 'cancelled');
+    }
+    const nextMain = run({ plans: [plan({ status: 'cancelled' })], taskId: 16,
+        files: controlFiles(policy(true, 2, 1)), extraTaskIds: [16] });
+    assert.equal(nextMain.created.length, 1);
+    assert.equal(nextMain.calls.launch.length, 0);
+});
+
+test('子任务删除、计划保存或开关落盘失败时不确认生效，恢复后继续取消并确认', () => {
+    for (const failure of [{ failTaskRemoval: true }, { failPlanWrites: true }, { failControlWrites: true }]) {
+        const result = run({ ...failure, plans: [plan()] });
+        let calls = 0;
+        assert.throws(() => result.getControl().sync(() => { calls++; return policy(false, 1); }, 'office-phone'));
+        assert.equal(calls, 1); // 失败期间只取策略，不发送新的版本确认。
+        assert.equal(result.files.has(controlFiles({})[0][0]), false);
+        const restored = run({ plans: result.getState().plans, files: result.files, now: at('08:36:00') });
+        const acknowledgements = [];
+        restored.getControl().sync((method, url, body) => { acknowledgements.push(body); return policy(false, 1); }, 'office-phone');
+        assert.equal(acknowledgements[1].applied_revision, 1);
+        assert.equal(restored.getState().plans[0].status, 'cancelled');
+        assert.equal(restored.calls.launch.length, 0);
+    }
+});
+
+test('确认请求期间服务端再次切换，仅应用新版本，下一轮确认且不重新规划', () => {
+    const result = run({ plans: [plan()] });
+    const acknowledgements = [];
+    result.getControl().sync((method, url, body) => {
+        acknowledgements.push(structuredClone(body));
+        return acknowledgements.length === 1 ? policy(false, 1) : policy(true, 2, 1);
+    }, 'office-phone');
+    assert.equal(acknowledgements.length, 2);
+    assert.equal(acknowledgements[1].applied_revision, 1);
+    assert.equal(JSON.parse(result.files.get(controlFiles({})[0][0])).revision, 2);
+    result.getControl().sync((method, url, body) => {
+        assert.equal(body.applied_revision, 2);
+        assert.equal(body.applied_enabled, true);
+        return policy(true, 2, 1);
+    }, 'office-phone');
+    assert.equal(result.created.length, 0);
+    assert.equal(result.getState().plans[0].status, 'cancelled');
 });

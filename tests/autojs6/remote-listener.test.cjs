@@ -7,7 +7,7 @@ const test = require('node:test');
 const source = fs.readFileSync(path.resolve(__dirname, '../../autojs6/office_remote_listener.js'), 'utf8');
 
 /** 为无限循环提供有界内存场景，请求完成后模拟脚本停止并检查锁已释放。 */
-function run(queueFailure = false, cooperativeStop = false) {
+function run(queueFailure = false, cooperativeStop = false, controlFailure = false) {
     const requests = [];
     const events = [];
     const stored = new Map([['pending_receipt', { id: 'c'.repeat(32), receipt: { lease_token: 'd'.repeat(32), outcome: 'uncertain' } }]]);
@@ -64,6 +64,11 @@ function run(queueFailure = false, cooperativeStop = false) {
         storages: { create: () => ({ get: (key, fallback) => stored.get(key) ?? fallback,
             put(key, value) { stored.set(key, structuredClone(value)); }, remove(key) { stored.delete(key); } }) },
         require(name) {
+            if (name.endsWith('/office_automation_control.js')) return { sync(request, deviceId) {
+                events.push('control-sync');
+                assert.equal(deviceId, 'office-phone');
+                if (controlFailure) throw new Error('模拟控制同步故障');
+            } };
             if (name.endsWith('/office_device_actions.js')) return {
                 acquire: () => ({ release() { released = true; } }),
                 wakeAndLaunch() { actions++; events.push('action'); return { outcome: 'launch_requested', error_code: null }; }
@@ -113,5 +118,14 @@ test('停止请求在长轮询后生效，已领取命令只保存不确定回�
     assert.equal(result.actions, 0);
     assert.equal(result.stored.get('pending_receipt').receipt.outcome, 'uncertain');
     assert.equal(result.stored.get('pending_receipt').receipt.error_code, 'listener_stopping');
+    assert.equal(result.released, true);
+});
+
+test('开关同步先于待补回执，失败不阻断主动打卡和本地核验', () => {
+    const result = run(false, false, true);
+    assert.equal(result.events[0], 'control-sync');
+    assert.equal(result.actions, 1);
+    assert.equal(result.stored.get('pending_receipt'), undefined);
+    assert.equal(result.requests.filter(request => request.path.includes('/attendance/')).length, 2);
     assert.equal(result.released, true);
 });
