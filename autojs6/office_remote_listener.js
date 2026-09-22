@@ -1,6 +1,6 @@
 /*
  * AutoJs6 常驻远程接收器。普通脚本，不需要 ui、无障碍选择器或模拟点击。
- * 将本文件、office_device_actions.js、office_attendance_queue.js、office_automation_control.js 和 remote-config.local.json 放在同一目录。
+ * 与 office_device_actions.js、office_attendance_queue.js、office_automation_control.js、office_attendance_cleanup.js 及配置文件放在同一目录。
  * 只执行服务端固定的 wake_dingtalk 动作，不执行远程传入的脚本或路径。
  */
 (function () {
@@ -10,6 +10,8 @@
     var actions = require(files.join(folder, "office_device_actions.js"));
     var attendanceQueue = null;
     var automationControl = null;
+    var attendanceCleanup = null;
+    var cleanupThread = null;
     var listenerLock = null;
     var config;
     var store;
@@ -128,7 +130,7 @@
                         targetAppPackage: "com.alibaba.android.rimet",
                         targetAppName: "",
                         openAppDelayMs: config.open_app_delay_ms
-                    }, config.keep_screen_on_seconds, deadline, report);
+                    }, config.keep_screen_on_seconds, deadline, report, null, { source: "remote_command", id: id });
                     entry.receipt = { lease_token: entry.receipt.lease_token, outcome: result.outcome, error_code: result.error_code };
                 } catch (error) {
                     // 中断或异常可能发生在启动请求之后，保留不确定结果，禁止自动再开一次。
@@ -162,6 +164,22 @@
         catch (error) { report("本地考勤核验模块未加载，请检查 office_attendance_queue.js；远程接收继续运行。"); }
         try { automationControl = require(files.join(folder, "office_automation_control.js")); }
         catch (error) { report("自动打卡开关模块未加载，请检查 office_automation_control.js；远程接收继续运行。"); }
+        try {
+            attendanceCleanup = require(files.join(folder, "office_attendance_cleanup.js"));
+            // 本地收尾线程不联网；即使回执／查询断网重试，三分钟截止仍会被检查。
+            cleanupThread = threads.start(function () {
+                var logged = false;
+                while (!stopRequested()) {
+                    try { attendanceCleanup.tick(); logged = false; }
+                    catch (error) {
+                        if (stopRequested()) break;
+                        if (!logged) report("HOME_STORAGE_ERROR：返回桌面状态暂不可读，请检查本地存储。");
+                        logged = true;
+                    }
+                    sleep(1000);
+                }
+            });
+        } catch (error) { report("返回桌面模块未能启动，请检查 office_attendance_cleanup.js；远程接收继续运行。"); }
         report("远程接收器已启动，正在连接服务端；保留原来的定时任务。");
         var failures = 0;
         var hasConnected = false;
@@ -181,14 +199,21 @@
                     }
                 }
                 var pending = store.get("pending_receipt", null);
-                if (pending != null && !sendReceipt(pending)) { sleep(5000); continue; }
+                var receiptDelivered = pending == null || sendReceipt(pending);
+                // 主动任务也取回终态；回执失败不妨碍只读查询和独立的本地收尾线程。
+                var cleanupPending = false;
+                if (attendanceCleanup) {
+                    try { cleanupPending = attendanceCleanup.pump(attendanceRequest, config.device_id); }
+                    catch (error) { report("VERIFY_PENDING：主动任务终态暂未取回，稍后重试。"); }
+                }
+                if (!receiptDelivered) { sleep(5000); continue; }
                 // 远程回执始终优先；每轮最多一个本地上报／结果查询，绝不在队列中重做动作。
                 var localPending = false;
                 if (attendanceQueue) {
                     try { localPending = attendanceQueue.pump(attendanceRequest, config.device_id); }
                     catch (error) { report("本地核验队列暂不可读，远程接收继续运行。"); }
                 }
-                var command = post("/api/devices/" + config.device_id + "/commands/lease", { wait_seconds: localPending ? 5 : 25 });
+                var command = post("/api/devices/" + config.device_id + "/commands/lease", { wait_seconds: localPending || cleanupPending ? 5 : 25 });
                 // 仅首次连接和失败后恢复时记录成功，正常的连续长轮询不刷屏。
                 if (!hasConnected) {
                     report("连接成功，正在等待远程命令。");
@@ -212,6 +237,8 @@
         // 不输出原始异常，防止包含连接配置或响应正文。
         report("接收器停止：请检查配置文件、存储权限和 AutoJs6 日志。");
     } finally {
-        if (listenerLock != null) listenerLock.release();
+        try {
+            if (cleanupThread != null) { cleanupThread.interrupt(); cleanupThread.join(1500); }
+        } finally { if (listenerLock != null) listenerLock.release(); }
     }
 })();

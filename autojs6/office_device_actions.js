@@ -1,9 +1,11 @@
 /* AutoJs6 共用动作：定时和远程入口使用同一把设备文件锁，不改变钉钉自身打卡规则。 */
-var heldLocks = [];
+// 接收器的网络循环与本地收尾线程共享模块，使用线程安全集合保存退出时待释放的锁。
+var heldLocks = new java.util.concurrent.CopyOnWriteArrayList();
 
 /** 释放持有的文件锁；重复释放安全，适用于脚本退出和正常结束。 */
 function releaseAll() {
-    heldLocks.slice().forEach(function (item) { item.release(); });
+    var snapshot = heldLocks.toArray();
+    for (var i = 0; i < snapshot.length; i++) snapshot[i].release();
 }
 events.on("exit", releaseAll);
 
@@ -43,11 +45,11 @@ function acquire(name, timeoutMs, deadline) {
                 released = true;
                 try { lock.release(); } finally {
                     try { channel.close(); } finally { handle.close(); }
-                    heldLocks = heldLocks.filter(function (value) { return value !== holder; });
+                    heldLocks.remove(holder);
                 }
             }
         };
-        heldLocks.push(holder);
+        heldLocks.add(holder);
         return holder;
     } catch (error) {
         try { channel.close(); } finally { handle.close(); }
@@ -70,9 +72,10 @@ function integer(value, min, max, name) {
  * @param {number|null} deadline 最迟允许请求打开应用的时间戳。
  * @param {Function} report 本地日志回调，不包含任何设备密钥。
  * @param {Function|null} stage 可选阶段回调 (name, unixMs)，用于本地事实持久化。
+ * @param {Object|null} attendanceRun 可选打卡归属 { source, id }，用于终态返回桌面。
  * @returns {Object} 亮屏结果、启动请求结果及固定错误码。
  */
-function wakeAndLaunch(config, keepSeconds, deadline, report, stage) {
+function wakeAndLaunch(config, keepSeconds, deadline, report, stage, attendanceRun) {
     integer(keepSeconds, 0, 600, "keepScreenOnSeconds");
     var guard = acquire("screen-action", 30000, deadline);
     if (guard == null) {
@@ -80,7 +83,20 @@ function wakeAndLaunch(config, keepSeconds, deadline, report, stage) {
             wake_status: "skipped", error_code: "action_busy", launch_requested: false };
     }
     var keeping = false;
+    var cleanup = null;
+    var cleanupOwner = null;
     try {
+        try {
+            var entry = files.path(String(engines.myEngine().getSource()));
+            var folder = String(new java.io.File(entry).getParent());
+            cleanup = require(files.join(folder, "office_attendance_cleanup.js"));
+            // 即便本次是 direct，也先失效旧归属，防止历史终态抢占当前手动动作。
+            cleanupOwner = cleanup.begin(attendanceRun || null);
+        } catch (error) {
+            // 无法保存新归属时不启动新应用，避免旧收尾记录在稍后切走未经登记的新动作。
+            report("HOME_STORAGE_ERROR：收尾归属未能保存，本次未发起设备动作。");
+            return { outcome: "failed", wake_status: "failed", error_code: "cleanup_storage_failed", launch_requested: false };
+        }
         var wasOn = device.isScreenOn();
         var isOn = wasOn;
         for (var attempt = 0; !isOn && attempt < 3; attempt++) {
@@ -118,8 +134,12 @@ function wakeAndLaunch(config, keepSeconds, deadline, report, stage) {
                 } else if (!device.isScreenOn()) {
                     result.error_code = "screen_off";
                 } else {
-                    // 沿用现有动作：不按 Home、不杀应用、不模拟点击，仅发送启动请求。
+                    // 此阶段只发送启动请求；桌面收尾在取得终态或三分钟截止后独立执行。
                     result.launch_requested = !!app.launchPackage(pkg);
+                    if (result.launch_requested && pkg === "com.alibaba.android.rimet") {
+                        try { cleanup.launched(cleanupOwner, Date.now()); }
+                        catch (error) { report("HOME_STORAGE_ERROR：应用已请求启动，但收尾阶段保存失败，请检查本地存储。"); }
+                    }
                     if (result.launch_requested && stage) stage("app_requested", Date.now());
                     result.outcome = result.launch_requested ? "launch_requested" : "failed";
                     if (!result.launch_requested) result.error_code = "launch_failed";

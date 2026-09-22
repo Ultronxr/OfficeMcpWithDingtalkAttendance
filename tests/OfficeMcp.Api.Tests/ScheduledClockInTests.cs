@@ -16,6 +16,39 @@ public sealed class ScheduledClockInTests
     private const string Endpoint = "/api/devices/office-phone/attendance/executions";
     private static readonly JsonSerializerOptions Json = DeviceCommandStore.JsonOptions;
 
+    /// <summary>手机主动任务收尾复用既有只读设备端点；可读取终态且不泄露领取令牌或跨设备访问。</summary>
+    [Fact]
+    public async Task DeviceCanReadRemoteTerminalForHomeCleanup()
+    {
+        await using var factory = new OfficeApiFactory { EnableDevices = true };
+        using var api = factory.AuthenticatedClient();
+        using var phone = factory.DeviceClient();
+        using var other = factory.DeviceClient("other-phone");
+        var created = await api.PostAsJsonAsync("/api/attendance/clock-in",
+            new ClockInRequest(Guid.NewGuid().ToString("D"), "OnDuty", WaitSeconds: 0), Json);
+        Assert.Equal(HttpStatusCode.Accepted, created.StatusCode);
+        var task = (await created.Content.ReadFromJsonAsync<ClockInTaskResponse>(Json))!;
+        var leased = await phone.PostAsJsonAsync("/api/devices/office-phone/commands/lease", new { wait_seconds = 0 });
+        var lease = (await leased.Content.ReadFromJsonAsync<DeviceLease>(Json))!;
+        await phone.PostAsJsonAsync("/api/devices/office-phone/commands/" + task.TaskId + "/report",
+            new DeviceReport(lease.LeaseToken, "launch_requested"), Json);
+        factory.Handler.VerificationResponse = _ => Snapshot(factory.Clock.GetUtcNow().ToUnixTimeMilliseconds());
+        await Process(factory, task.TaskId);
+        var result = await phone.GetAsync("/api/devices/office-phone/attendance/tasks/" + task.TaskId);
+        Assert.Equal(HttpStatusCode.OK, result.StatusCode);
+        var summary = (await result.Content.ReadFromJsonAsync<ClockInTaskResponse>(Json))!;
+        Assert.Equal("remote_command", summary.Source);
+        Assert.True(summary.IsTerminal);
+        Assert.True(summary.AttendanceConfirmed);
+        var body = await result.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(lease.LeaseToken, body);
+        Assert.DoesNotContain(OfficeApiFactory.UserId, body);
+        Assert.Equal(HttpStatusCode.NotFound, (await other.GetAsync(
+            "/api/devices/other-phone/attendance/tasks/" + task.TaskId)).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await phone.PostAsJsonAsync(
+            "/api/devices/office-phone/commands/lease", new { wait_seconds = 0 })).StatusCode);
+    }
+
     /// <summary>构造当天一分钟前完成的合成上班执行，不使用真实员工或手机资料。</summary>
     private static ScheduledClockInReport Report(OfficeApiFactory factory)
     {

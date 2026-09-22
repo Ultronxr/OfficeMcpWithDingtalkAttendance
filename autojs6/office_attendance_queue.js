@@ -84,6 +84,16 @@ function ids() {
 /** 把终态摘要写回日志；写入失败时保留 final_pending，重启后可重试记录。 */
 function writeFinal(entry) {
     var result = entry.result;
+    // 共用收尾只接受本次已启动的归属；旧结果或升级前任务不会补做桌面动作。
+    var terminal = { task_id: result.task_id, source: "local_schedule", is_terminal: true,
+        state: result.state, attendance_confirmed: result.attendance_confirmed };
+    try {
+        var cleanup = require(files.join(folder, "office_attendance_cleanup.js"));
+        if (!cleanup.localTerminal(entry.report.local_run_id, terminal)) return;
+    } catch (error) {
+        // 收尾状态损坏不能卡住整条事实队列；其独立截止检查仍会在状态可用时继续。
+        log("[Office MCP] HOME_STORAGE_ERROR：核验结果已取得，但收尾通知失败；考勤结果继续归档。");
+    }
     var attendance = result.record || {};
     record(entry, "VERIFY_RESULT：task_id=" + result.task_id + "，state=" + result.state +
         "，attendance_confirmed=" + result.attendance_confirmed + "，relation=" + (result.verification_relation || "none") +

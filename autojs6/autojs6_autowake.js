@@ -161,9 +161,10 @@ var CONFIG = {
      * @param {number} keepSeconds 继续保亮的秒数。
      * @param {number|null} deadline 本次计划的执行截止时间。
      * @param {Object|null} verification 本地执行事实句柄，direct 模式不传入。
+     * @param {Object|null} attendanceRun 随机执行归属，核验存储失败时仍可在三分钟后收尾。
      * @returns {string} 亮屏状态，或在应用启动前到达截止时间时的 expired 状态。
      */
-    function wake(keepSeconds, deadline, verification) {
+    function wake(keepSeconds, deadline, verification, attendanceRun) {
         // AutoJs6 的 files 未提供 dirname，使用 Java File 解析当前入口的目录。
         var folder = String(new java.io.File(selfPath).getParent());
         var actions = require(files.join(folder, "office_device_actions.js"));
@@ -171,7 +172,7 @@ var CONFIG = {
             // 核验落盘故障只记录错误，不阻断既有设备动作。
             try { verification.queue.stage(verification.handle, name, time); }
             catch (error) { report("VERIFY_STORAGE_ERROR：阶段保存失败，后续仅核验已保存事实。"); }
-        } : null);
+        } : null, attendanceRun || null);
         if (verification) verification.result = result;
         if (result.error_code === "wake_failed") {
             throw new Error("请求亮屏 3 次后屏幕仍未点亮");
@@ -295,6 +296,8 @@ var CONFIG = {
         p.actualAt = now;
         p.delayMs = now - p.at;
         p.executionDeadlineAt = deadline;
+        // 收尾身份独立于上报是否成功；未能生成 Task 时仍保留三分钟桌面兜底。
+        p.localRunId = p.localRunId || String(java.util.UUID.randomUUID()).replace(/-/g, "");
         save();
 
         report(
@@ -320,7 +323,7 @@ var CONFIG = {
         }
 
         try {
-            p.status = wake(p.keepSeconds, deadline, verification);
+            p.status = wake(p.keepSeconds, deadline, verification, { source: "local_schedule", id: p.localRunId });
             save();
         } catch (e) {
             p.status = "failed";

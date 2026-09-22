@@ -16,6 +16,9 @@ function run(queueFailure = false, cooperativeStop = false, controlFailure = fal
     let pumps = 0;
     let leases = 0;
     let actions = 0;
+    let cleanupStarted = false;
+    let cleanupInterrupted = false;
+    let tracked = null;
     const now = Date.now();
     const config = { base_url: 'http://192.0.2.10:18101', device_id: 'office-phone', device_key: 'synthetic-key-'.repeat(4) };
 
@@ -61,9 +64,23 @@ function run(queueFailure = false, cooperativeStop = false, controlFailure = fal
         java: { net: { URL: Url }, io: { File: JavaFile, InputStreamReader, BufferedReader },
             lang: { String: JavaString, Thread: { currentThread: () => ({ isInterrupted: () => false }) } } },
         runtime: { getProperty: key => { assert.equal(key, 'office_mcp.listener.stop'); return cooperativeStop && pumps > 0; } },
+        threads: { start(callback) {
+            assert.equal(typeof callback, 'function');
+            cleanupStarted = true;
+            return { interrupt() { cleanupInterrupted = true; }, join(value) { assert.equal(value, 1500); } };
+        } },
         storages: { create: () => ({ get: (key, fallback) => stored.get(key) ?? fallback,
             put(key, value) { stored.set(key, structuredClone(value)); }, remove(key) { stored.delete(key); } }) },
         require(name) {
+            if (name.endsWith('/office_attendance_cleanup.js')) return {
+                tick() { events.push('home-tick'); },
+                pump(request, deviceId) {
+                    if (!tracked) return false;
+                    request('GET', '/api/devices/' + deviceId + '/attendance/tasks/' + tracked.id, null);
+                    tracked = null;
+                    return true;
+                }
+            };
             if (name.endsWith('/office_automation_control.js')) return { sync(request, deviceId) {
                 events.push('control-sync');
                 assert.equal(deviceId, 'office-phone');
@@ -71,7 +88,12 @@ function run(queueFailure = false, cooperativeStop = false, controlFailure = fal
             } };
             if (name.endsWith('/office_device_actions.js')) return {
                 acquire: () => ({ release() { released = true; } }),
-                wakeAndLaunch() { actions++; events.push('action'); return { outcome: 'launch_requested', error_code: null }; }
+                wakeAndLaunch(config, keepSeconds, deadline, report, stage, run) {
+                    assert.equal(run.source, 'remote_command');
+                    assert.equal(run.id, 'a'.repeat(32));
+                    tracked = run;
+                    actions++; events.push('action'); return { outcome: 'launch_requested', error_code: null };
+                }
             };
             assert.ok(name.endsWith('/office_attendance_queue.js'));
             return { pump(request, deviceId) {
@@ -85,14 +107,14 @@ function run(queueFailure = false, cooperativeStop = false, controlFailure = fal
         }
     };
     vm.runInNewContext(source, api, { timeout: 1000 });
-    return { requests, events, actions, released, stored };
+    return { requests, events, actions, released, stored, cleanupStarted, cleanupInterrupted };
 }
 
 test('旧远程回执优先，本地短请求和最终 GET 查询共存且不重复生成远程动作', () => {
     const result = run();
     assert.ok(result.requests[0].path.endsWith('/commands/' + 'c'.repeat(32) + '/report'));
     assert.equal(result.actions, 1);
-    const local = result.requests.filter(request => request.path.includes('/attendance/'));
+    const local = result.requests.filter(request => request.path.includes('/attendance/') && !request.path.endsWith('a'.repeat(32)));
     assert.deepEqual(local.map(request => request.method), ['POST', 'GET']);
     assert.equal(local[1].body, null);
     assert.equal(local[1].doOutput, undefined);
@@ -108,7 +130,7 @@ test('旧远程回执优先，本地短请求和最终 GET 查询共存且不重
 test('本地队列故障不会阻止原远程任务领取与回执', () => {
     const result = run(true);
     assert.equal(result.actions, 1);
-    assert.deepEqual(result.requests.filter(request => request.path.endsWith('/lease')).map(request => request.body.wait_seconds), [25, 25]);
+    assert.deepEqual(result.requests.filter(request => request.path.endsWith('/lease')).map(request => request.body.wait_seconds), [25, 5]);
     assert.equal(result.stored.get('pending_receipt'), undefined);
     assert.equal(result.released, true);
 });
@@ -126,6 +148,17 @@ test('开关同步先于待补回执，失败不阻断主动打卡和本地核�
     assert.equal(result.events[0], 'control-sync');
     assert.equal(result.actions, 1);
     assert.equal(result.stored.get('pending_receipt'), undefined);
-    assert.equal(result.requests.filter(request => request.path.includes('/attendance/')).length, 2);
+    assert.equal(result.requests.filter(request => request.path.includes('/attendance/')).length, 3);
     assert.equal(result.released, true);
+});
+
+test('主动任务关联终态 GET，独立收尾线程随常驻接收器启动和停止', () => {
+    const result = run();
+    const remote = result.requests.filter(request => request.path.endsWith('/attendance/tasks/' + 'a'.repeat(32)));
+    assert.equal(remote.length, 1);
+    assert.equal(remote[0].method, 'GET');
+    assert.equal(remote[0].connectTimeout, 3000);
+    assert.equal(remote[0].readTimeout, 5000);
+    assert.equal(result.cleanupStarted, true);
+    assert.equal(result.cleanupInterrupted, true);
 });

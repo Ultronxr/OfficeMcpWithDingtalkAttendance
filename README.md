@@ -4,6 +4,8 @@
 
 AutoJs6 远程打卡与上午本地定时打卡共用持久化 Task 和钉钉 API 核验。定时动作后由常驻接收器上报执行事实、取回结果并写入手机日志，断网只补传事实，不重做动作。手机部署见 [定时与远程打卡说明](autojs6/README.md)，当前部署和运维见 [部署说明](docs/deployment.md)。
 
+手机在主动／被动打卡取得终态后请求返回桌面，保留钉钉后台；始终未取得结果时，启动钉钉三分钟后也会请求桌面，补报与核验继续。现有保亮仍为 15 秒，熄屏收尾不再次唤醒；新动作会使旧收尾失效，避免延迟回执切走新任务。规则、日志和升级要求见 [返回桌面开发目标](docs/clock-in-return-home-prd.md)。
+
 被动自动打卡支持远程开关：`attendance_automation_set` 对应 `POST /api/attendance/automation`，显式传 `enabled`、UUID `request_id`，可选 `wait_seconds`（默认 45）。`attendance_automation_status` 对应同路径 GET。关闭禁止新规划并取消待执行子任务；开启从下一次原定主任务恢复，不补建当天计划，主动打卡和已发生动作的核验不受影响。手机断网沿用本地最后状态，只有 `sync_state=applied` 才代表当前 `desired_enabled` 已在手机生效；HTTP 202 表示仍待同步。规则与持久化边界见 [开发目标](docs/scheduled-clock-in-control-prd.md)。
 
 ## 部署方式
@@ -244,7 +246,7 @@ Invoke-RestMethod http://127.0.0.1:18101/healthz
 
 准备了两种匹配现有网关实现的配置，二选一：
 
-- `deploy/gateway-office.openapi.yaml`：从受保护的 `/openapi/v1.json` 导入考勤查询、加班统计、员工列表、远程打卡和任务状态五个操作。
+- `deploy/gateway-office.openapi.yaml`：从受保护的 `/openapi/v1.json` 导入考勤、加班、员工、主动打卡与 Task 查询、自动打卡开关与状态查询，共七个操作。
 - `deploy/gateway-office.http.yaml`：手工描述 HTTP 工具，网关启动时无需读取本服务文档。
 
 将示例服务项合并到自己的 mcp-gateway 配置中，例如 `/opt/mcp-gateway/config/gateway.yaml`，并在网关私密环境配置 `OFFICE_API_KEY`，值与本服务的 `Authentication:ApiKey` 相同。随后重启网关并刷新客户端工具列表。MCP 地址示例为 `https://mcp.example.com/office_common_tools/mcp`，需替换为实际域名；工具名保留后端原名，`attendance_query` 的必填参数为 `start_date` 和 `end_date`，返回按日组织的数组。

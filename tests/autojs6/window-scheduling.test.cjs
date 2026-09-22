@@ -12,6 +12,7 @@ const entrySource = fs.readFileSync(path.resolve(__dirname, '../../autojs6/autoj
 const actionsSource = fs.readFileSync(path.resolve(__dirname, '../../autojs6/office_device_actions.js'), 'utf8');
 const queueSource = fs.readFileSync(path.resolve(__dirname, '../../autojs6/office_attendance_queue.js'), 'utf8');
 const controlSource = fs.readFileSync(path.resolve(__dirname, '../../autojs6/office_automation_control.js'), 'utf8');
+const cleanupSource = fs.readFileSync(path.resolve(__dirname, '../../autojs6/office_attendance_cleanup.js'), 'utf8');
 const bodyOffset = entrySource.indexOf('(function () {');
 
 /** 将测试用的本地时间转换为固定日期时间戳，避免运行日期影响结果。 */
@@ -38,10 +39,11 @@ function run(options = {}) {
     let loadedActions;
     let loadedQueue;
     let loadedControl;
+    let loadedCleanup;
     let nextUuid = 1;
     const logs = [];
     const created = [];
-    const calls = { wake: [], launch: [], keep: [], cancelKeep: [] };
+    const calls = { wake: [], launch: [], keep: [], cancelKeep: [], home: [] };
     const removed = [];
     const taskMap = new Map();
     let nextTaskId = 100;
@@ -79,7 +81,9 @@ function run(options = {}) {
     /** 模拟 Android AtomicFile 的成功提交和失败回滚，用于持久化恢复测试。 */
     function AtomicFile(file) {
         this.startWrite = () => {
-            if (options.failQueueWrites || (options.failControlWrites && file.path.endsWith('/automation.json')))
+            if ((options.failQueueWrites && file.path.includes('/attendance/')) ||
+                (options.failCleanupWrites && file.path.endsWith('/attendance-cleanup.json')) ||
+                (options.failControlWrites && file.path.endsWith('/automation.json')))
                 throw new Error('模拟存储故障');
             return { value: '', write(value) { this.value = String(value); } };
         };
@@ -106,6 +110,24 @@ function run(options = {}) {
         });
     }
 
+    /** 模拟线程安全锁集合的接口，行为断言仍使用实际文件锁替身。 */
+    function CopyOnWriteArrayList() {
+        const items = new Set();
+        this.add = item => items.add(item);
+        this.remove = item => items.delete(item);
+        this.toArray = () => [...items];
+    }
+
+    /** 捕获系统桌面 Intent，禁止用清任务或重新启动钉钉代替 Home。 */
+    function Intent(action) {
+        this.action = action;
+        this.categories = [];
+        this.flags = 0;
+        this.addCategory = value => this.categories.push(value);
+        this.addFlags = value => { this.flags |= value; };
+    }
+    Object.assign(Intent, { ACTION_MAIN: 'android.intent.action.MAIN', CATEGORY_HOME: 'android.intent.category.HOME', FLAG_ACTIVITY_NEW_TASK: 0x10000000 });
+
     const math = Object.create(Math);
     math.random = () => options.random ?? 0.5;
     const api = {
@@ -117,8 +139,16 @@ function run(options = {}) {
             exists: name => name === scriptPath || memoryFiles.has(name), append(name, text) { memoryFiles.set(name, (memoryFiles.get(name) || '') + text); },
             listDir: directory => [...memoryFiles.keys()].filter(name => path.posix.dirname(name) === directory).map(name => path.posix.basename(name)) },
         java: { io: { File: JavaFile, RandomAccessFile }, lang: { String: JavaString },
-            util: { UUID: { randomUUID: () => (nextUuid++).toString(16).padStart(32, '0') } } },
-        android: { util: { AtomicFile } },
+            util: { UUID: { randomUUID: () => (nextUuid++).toString(16).padStart(32, '0') }, concurrent: { CopyOnWriteArrayList } } },
+        android: { util: { AtomicFile }, content: { Intent } },
+        context: { startActivity(intent) {
+            if (options.onHome) options.onHome();
+            if (options.failHome) throw new Error('模拟系统拒绝桌面请求');
+            assert.equal(intent.action, Intent.ACTION_MAIN);
+            assert.deepEqual(intent.categories, [Intent.CATEGORY_HOME]);
+            assert.equal(intent.flags, Intent.FLAG_ACTIVITY_NEW_TASK);
+            calls.home.push(clock);
+        } },
         engines: { myEngine: () => ({ getSource: () => scriptPath,
             execArgv: { intent: { getLongExtra: () => options.taskId ?? -1 } } }) },
         device: {
@@ -128,7 +158,7 @@ function run(options = {}) {
             cancelKeepingAwake() { calls.cancelKeep.push(clock); }
         },
         app: { getPackageName: () => 'com.alibaba.android.rimet',
-            launchPackage() { calls.launch.push(clock); if (options.onLaunch) options.onLaunch(loadedControl); return true; } },
+            launchPackage() { calls.launch.push(clock); if (options.onLaunch) options.onLaunch(loadedControl, loadedCleanup); return options.launchSuccess !== false; } },
         storages: { create(name) {
             assert.equal(name, 'autojs6.screen_wake.v1');
             return {
@@ -153,6 +183,14 @@ function run(options = {}) {
     };
     const context = vm.createContext({ ...api });
     context.require = requested => {
+        if (requested === path.posix.join(scriptFolder, 'office_attendance_cleanup.js')) {
+            if (!loadedCleanup) {
+                const moduleContext = { ...api, require: context.require, module: { exports: {} } };
+                vm.runInNewContext(cleanupSource, moduleContext, { timeout: 1000 });
+                loadedCleanup = moduleContext.module.exports;
+            }
+            return loadedCleanup;
+        }
         if (requested === path.posix.join(scriptFolder, 'office_automation_control.js')) {
             if (options.missingControl) throw new Error('模拟控制模块未部署');
             if (!loadedControl) {
@@ -172,7 +210,7 @@ function run(options = {}) {
         }
         assert.equal(requested, path.posix.join(scriptFolder, 'office_device_actions.js'));
         if (!loadedActions) {
-            const moduleContext = { ...api, module: { exports: {} } };
+            const moduleContext = { ...api, require: context.require, module: { exports: {} } };
             vm.runInNewContext(actionsSource, moduleContext, { timeout: 1000 });
             loadedActions = moduleContext.module.exports;
         }
@@ -187,6 +225,9 @@ function run(options = {}) {
         files: memoryFiles, queue: loadedQueue, advance(milliseconds) { clock += milliseconds; },
         getQueue: () => context.require(path.posix.join(scriptFolder, 'office_attendance_queue.js')),
         getControl: () => context.require(path.posix.join(scriptFolder, 'office_automation_control.js')),
+        getCleanup: () => context.require(path.posix.join(scriptFolder, 'office_attendance_cleanup.js')),
+        getActions: () => context.require(path.posix.join(scriptFolder, 'office_device_actions.js')),
+        setScreen(value) { screenOn = value; },
         getState: () => structuredClone(state) };
 }
 
@@ -649,4 +690,200 @@ test('确认请求期间服务端再次切换，仅应用新版本，下一轮�
     }, 'office-phone');
     assert.equal(result.created.length, 0);
     assert.equal(result.getState().plans[0].status, 'cancelled');
+});
+
+/** 读取统一收尾文件，断言真实模块持久化的归属与阶段。 */
+function cleanupState(result) {
+    const text = result.files.get(path.posix.join(scriptFolder, '.office-mcp/attendance-cleanup.json'));
+    return text ? JSON.parse(text) : null;
+}
+
+/** 在现有真实动作模块中执行合成主动任务，仅由虚拟设备记录启动请求。 */
+function startRemote(result, id = 'd'.repeat(32)) {
+    return result.getActions().wakeAndLaunch({ openAppAfterWake: true,
+        targetAppPackage: 'com.alibaba.android.rimet', openAppDelayMs: 800 }, 0, null, () => {}, null,
+        { source: 'remote_command', id });
+}
+
+test('被动任务任意终态均请求一次桌面，熄屏也不唤醒、不改写核验结果', () => {
+    for (const state of ['succeeded', 'already_completed', 'failed', 'expired', 'unconfirmed']) {
+        const result = run({ plans: [plan()], taskId: 16, now: at('08:40:00') });
+        result.setScreen(false);
+        const wakes = result.calls.wake.length;
+        result.queue.pump(() => ({ ...taskResult(true), state, attendance_confirmed: ['succeeded', 'already_completed'].includes(state) }), 'office-phone');
+        result.getCleanup().tick();
+        result.getCleanup().tick();
+        assert.equal(result.calls.home.length, 1);
+        assert.equal(result.calls.wake.length, wakes);
+        assert.equal(result.calls.launch.length, 1);
+        assert.equal(cleanupState(result).home_state, 'requested');
+        assert.equal(cleanupState(result).home_reason, 'task_terminal');
+        assert.equal(queueEntries(result)[0].result.state, state);
+        assert.equal(queueEntries(result)[0].state, 'done');
+    }
+});
+
+test('未打开钉钉、过期及普通 direct 都不产生返回桌面动作', () => {
+    for (const options of [
+        { plans: [plan()], taskId: 16, now: at('08:40:00'), launchSuccess: false },
+        { plans: [plan()], taskId: 16, now: at('08:51:00') },
+        { config: { mode: 'direct' } },
+        { plans: [plan()], taskId: 16, now: at('08:40:00'), config: { openAppAfterWake: false } }
+    ]) {
+        const result = run(options);
+        if (result.queue) result.queue.pump(() => taskResult(true), 'office-phone');
+        result.advance(300000);
+        result.getCleanup().tick();
+        assert.equal(result.calls.home.length, 0);
+    }
+});
+
+test('本地三分钟边界返回桌面，不依赖上报成功，晚到结果仍归档但不重复 Home', () => {
+    const result = run({ plans: [plan()], taskId: 16, now: at('08:40:00') });
+    result.queue.pump(() => { throw new Error('网络断开'); }, 'office-phone');
+    result.advance(179999);
+    result.getCleanup().tick();
+    assert.equal(result.calls.home.length, 0);
+    result.advance(1);
+    result.getCleanup().tick();
+    assert.equal(result.calls.home.length, 1);
+    assert.equal(cleanupState(result).home_reason, 'verification_wait_timeout');
+    assert.equal(queueEntries(result)[0].state, 'pending');
+    result.queue.pump(() => taskResult(true), 'office-phone');
+    result.getCleanup().tick();
+    assert.equal(result.calls.home.length, 1);
+    assert.equal(queueEntries(result)[0].state, 'done');
+});
+
+test('核验队列保存失败仍有独立三分钟收尾，不能把队列异常当作打卡失败', () => {
+    const result = run({ plans: [plan()], taskId: 16, now: at('08:40:00'), failQueueWrites: true });
+    assert.equal(result.calls.launch.length, 1);
+    assert.equal(queueEntries(result).length, 0);
+    result.advance(180000);
+    result.getCleanup().tick();
+    assert.equal(result.calls.home.length, 1);
+    assert.equal(cleanupState(result).terminal_state, undefined);
+});
+
+test('主动任务查询已有设备端点并取得终态，超时 Home 后继续查询核验', () => {
+    const result = run();
+    startRemote(result);
+    assert.equal(cleanupState(result).task_id, 'd'.repeat(32));
+    result.getCleanup().pump((method, url, body) => {
+        assert.equal(method, 'GET');
+        assert.equal(body, null);
+        assert.ok(url.endsWith('/attendance/tasks/' + 'd'.repeat(32)));
+        throw new Error('服务暂不可达');
+    }, 'office-phone');
+    result.advance(180000);
+    result.getCleanup().tick();
+    assert.equal(result.calls.home.length, 1);
+    result.getCleanup().pump(() => ({ ...taskResult(true), source: 'remote_command', task_id: 'd'.repeat(32) }), 'office-phone');
+    result.getCleanup().tick();
+    result.getCleanup().pump(() => assert.fail('终态不再查询'), 'office-phone');
+    assert.equal(result.calls.home.length, 1);
+    assert.equal(cleanupState(result).terminal_state, 'succeeded');
+    assert.ok(result.files.get(path.posix.join(scriptFolder, 'office_remote_listener.js.log')).includes('VERIFY_RESULT'));
+});
+
+test('主动任务终态早于截止立即收尾，错误来源或 Task ID 不触发桌面', () => {
+    for (const invalid of [
+        { ...taskResult(true), task_id: 'd'.repeat(32) },
+        { ...taskResult(true), source: 'remote_command' },
+        { ...taskResult(true), source: 'remote_command', task_id: 'd'.repeat(32), state: 'future_state' }
+    ]) {
+        const result = run();
+        startRemote(result);
+        result.getCleanup().pump(() => invalid, 'office-phone');
+        result.getCleanup().tick();
+        assert.equal(result.calls.home.length, 0);
+        assert.equal(cleanupState(result).verification_done, false);
+        result.advance(30000);
+        result.getCleanup().pump(() => ({ ...taskResult(true), source: 'remote_command', task_id: 'd'.repeat(32) }), 'office-phone');
+        result.getCleanup().tick();
+        assert.equal(result.calls.home.length, 1);
+        assert.equal(cleanupState(result).home_reason, 'task_terminal');
+    }
+});
+
+test('旧被动结果不抢占新主动任务；网络请求期间出现新任务也丢弃旧主动结果', () => {
+    const result = run({ plans: [plan()], taskId: 16, now: at('08:40:00') });
+    startRemote(result);
+    result.queue.pump(() => taskResult(true), 'office-phone');
+    result.getCleanup().tick();
+    assert.equal(result.calls.home.length, 0);
+    assert.equal(queueEntries(result)[0].state, 'done');
+    result.getCleanup().pump(() => {
+        startRemote(result, 'e'.repeat(32));
+        return { ...taskResult(true), source: 'remote_command', task_id: 'd'.repeat(32) };
+    }, 'office-phone');
+    result.getCleanup().tick();
+    assert.equal(result.calls.home.length, 0);
+    assert.equal(cleanupState(result).task_id, 'e'.repeat(32));
+    assert.equal(cleanupState(result).terminal_state, undefined);
+});
+
+test('设备动作锁被占用时不 Home，释放后重试；新 direct 动作使旧收尾失效', () => {
+    const result = run({ plans: [plan()], taskId: 16, now: at('08:40:00') });
+    result.queue.pump(() => taskResult(true), 'office-phone');
+    const lock = result.getActions().acquire('screen-action', 0, null);
+    result.getCleanup().tick();
+    assert.equal(result.calls.home.length, 0);
+    lock.release();
+    result.getCleanup().tick();
+    assert.equal(result.calls.home.length, 1);
+    startRemote(result);
+    // 普通 direct 仅更新动作归属，不追踪 Task，也不让旧任务晚到结果打断它。
+    result.getActions().wakeAndLaunch({ openAppAfterWake: true, targetAppPackage: 'com.alibaba.android.rimet', openAppDelayMs: 0 }, 0, null, () => {});
+    result.advance(300000);
+    result.getCleanup().tick();
+    assert.equal(result.calls.home.length, 1);
+    assert.equal(cleanupState(result).phase, 'ignored');
+});
+
+test('重启恢复待收尾任务，桌面已请求或尝试中断的记录不重复执行', () => {
+    const first = run({ plans: [plan()], taskId: 16, now: at('08:40:00') });
+    first.queue.pump(() => taskResult(true), 'office-phone');
+    const restored = run({ plans: first.getState().plans, files: first.files, now: at('08:41:00') });
+    restored.getCleanup().tick();
+    assert.equal(restored.calls.home.length, 1);
+    const again = run({ plans: restored.getState().plans, files: restored.files, now: at('08:42:00') });
+    again.getCleanup().tick();
+    assert.equal(again.calls.home.length, 0);
+    const state = cleanupState(again);
+    state.home_state = 'attempting';
+    again.files.set(path.posix.join(scriptFolder, '.office-mcp/attendance-cleanup.json'), JSON.stringify(state));
+    again.getCleanup().tick();
+    assert.equal(again.calls.home.length, 0);
+});
+
+test('桌面请求失败独立记录，不撤销已核验考勤、不重新启动钉钉', () => {
+    const result = run({ plans: [plan()], taskId: 16, now: at('08:40:00'), failHome: true });
+    result.queue.pump(() => taskResult(true), 'office-phone');
+    result.getCleanup().tick();
+    assert.equal(cleanupState(result).home_state, 'failed');
+    assert.equal(queueEntries(result)[0].result.attendance_confirmed, true);
+    assert.equal(result.calls.launch.length, 1);
+    result.advance(300000);
+    result.getCleanup().tick();
+    assert.equal(result.calls.home.length, 0);
+});
+
+test('收尾文件损坏不阻止已取得的本地考勤结果归档，也不猜测桌面动作', () => {
+    const result = run({ plans: [plan()], taskId: 16, now: at('08:40:00') });
+    result.files.set(path.posix.join(scriptFolder, '.office-mcp/attendance-cleanup.json'), '{broken');
+    result.queue.pump(() => taskResult(true), 'office-phone');
+    assert.equal(queueEntries(result)[0].state, 'done');
+    assert.equal(queueEntries(result)[0].result.attendance_confirmed, true);
+    assert.ok(result.logs.some(line => line.includes('HOME_STORAGE_ERROR')));
+    assert.throws(() => result.getCleanup().tick());
+    assert.equal(result.calls.home.length, 0);
+});
+
+test('新动作不能保存归属时不亮屏或启动应用，以免被旧待办错误收尾', () => {
+    const result = run({ plans: [plan()], taskId: 16, now: at('08:40:00'), failCleanupWrites: true });
+    assert.equal(result.calls.wake.length, 0);
+    assert.equal(result.calls.launch.length, 0);
+    assert.equal(queueEntries(result)[0].report.error_code, 'cleanup_storage_failed');
+    assert.ok(result.logs.some(line => line.includes('HOME_STORAGE_ERROR')));
 });
