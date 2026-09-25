@@ -1,3 +1,4 @@
+using OfficeMcp.Api.Infrastructure.Time;
 using System.Globalization;
 using System.Diagnostics;
 using System.Security.Cryptography;
@@ -28,7 +29,7 @@ public sealed partial class ClockInService(DeviceCommandStore store, DingTalkCli
         if (request.WaitSeconds is < 0 or > 60)
             throw new ApiRequestException(400, "invalid_wait_seconds", "wait_seconds 必须在 0 至 60 秒之间。");
         var now = clock.GetUtcNow();
-        var today = DateOnly.FromDateTime(now.ToOffset(TimeSpan.FromHours(8)).DateTime);
+        var today = OfficeTime.WorkDate(now);
         var workDate = today;
         if (request.WorkDate is not null && (request.WorkDate.Length != 10 || !DateOnly.TryParseExact(request.WorkDate,
             "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out workDate)))
@@ -49,7 +50,7 @@ public sealed partial class ClockInService(DeviceCommandStore store, DingTalkCli
         var baseline = await ReadSnapshotAsync(dateText, request.CheckType, token);
         if (workDate != today && baseline?.PlannedTime is null)
             throw new ApiRequestException(400, "cross_day_schedule_required", "核验前一天的下班卡需要明确的跨天排班记录。");
-        if (workDate != today && DateOnly.FromDateTime(baseline!.PlannedTime!.Value.ToOffset(TimeSpan.FromHours(8)).DateTime) != today)
+        if (workDate != today && OfficeTime.WorkDate(baseline!.PlannedTime!.Value) != today)
             throw new ApiRequestException(400, "cross_day_schedule_required", "该下班时段不属于当前日期的跨天排班。");
 
         var alreadyDone = request.CheckType == "OnDuty" && IsRecorded(baseline);
@@ -224,7 +225,7 @@ public sealed partial class ClockInService(DeviceCommandStore store, DingTalkCli
             metadata.WorkDate, metadata.CheckType, masked, await store.IsOnlineAsync(job.DeviceId, token), job.RequiresDeviceAction ? job.ExpiresAt : null,
             job.DeviceOutcome, job.Result?.Deserialize<AttendanceRecord>(DeviceCommandStore.JsonOptions),
             job.State == "already_completed" && job.RequiresDeviceAction ? "已有上班打卡记录，未再次下发手机动作。" : job.LastError ?? job.VerificationError,
-            job.Source, metadata.LocalExecution, job.CreatedAt, job.VerificationDeadline, job.FinishedAt,
+            job.Source, LocalExecutionResponse.FromReport(metadata.LocalExecution), job.CreatedAt, job.VerificationDeadline, job.FinishedAt,
             job.VerificationAttempts, job.LastVerifiedAt, job.VerificationError, job.VerificationRelation);
     }
 

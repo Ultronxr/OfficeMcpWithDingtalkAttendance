@@ -17,12 +17,11 @@ public sealed class AttendanceOptions
 /// <summary>单个工作日的查询结果；仅 success=true 时，空 records 表示未返回考勤结果。</summary>
 /// <param name="WorkDate">考勤工作日，跨天的下班记录仍属于此工作日。</param>
 /// <param name="UserId">脱敏后的查询员工 ID，保留首尾各三位，中间以星号替代。</param>
-/// <param name="TimeZone">时间解释所使用的时区。</param>
 /// <param name="Records">当天全部上下班记录，按计划时间排序。</param>
 /// <param name="Success">当日查询是否成功；成功且没有记录才代表无考勤结果。</param>
 /// <param name="Error">当日查询失败的安全错误信息；成功时不输出此字段。</param>
 /// <param name="UserName">按姓名查询时选中的员工姓名。</param>
-public sealed record AttendanceResponse(DateOnly WorkDate, string UserId, string TimeZone,
+public sealed record AttendanceResponse(DateOnly WorkDate, string UserId,
     IReadOnlyList<AttendanceRecord> Records, bool Success = true,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] AttendanceError? Error = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? UserName = null);
@@ -41,7 +40,7 @@ public sealed record AttendanceError(string Code, string Message,
 /// <param name="ActualCheckTime">实际打卡时间；没有打卡时间时为 null。</param>
 /// <param name="StatusCode">钉钉原始考勤状态码。</param>
 /// <param name="Status">中文状态，未识别状态保留原始码供调用者判断。</param>
-/// <param name="Details">仅 full 模式输出完整打卡明细，保持钉钉原始字段名和值。</param>
+/// <param name="Details">仅 full 模式输出完整打卡明细；已知时间统一为可读北京时间，其他字段保持原值。</param>
 public sealed record AttendanceRecord(string? CheckType, string CheckTypeName,
     DateTimeOffset? PlannedCheckTime, DateTimeOffset? ActualCheckTime, string? StatusCode, string Status,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] JsonElement? Details = null);

@@ -3,7 +3,7 @@
 services:
   - name: office_common_tools
     title: 办公服务 · 考勤
-    instructions: 此连接提供员工列表、动态员工考勤查询、加班统计、主动打卡和任务状态查询。attendance_query 返回全部日期考勤，attendance_overtime 仅在 days 返回按配置筛选的加班日及全部打卡，并提供 summary；complete=false 时查看 errors，不能把查询失败当成没有加班。可先用 employee_list 获取员工ID；姓名重名时根据候选ID选择，勿猜选。主动打卡仍使用配置的固定员工。仅在用户明确要求打卡时调用 attendance_clock_in；未完成时用 attendance_clock_in_status 查询同一任务，只有 attendance_confirmed=true 才确认有记录。attendance_automation_set 用于明确开关被动自动打卡；开启不补打，关闭不影响主动打卡。手机断网沿用旧开关，只有 sync_state=applied 才可说明当前 desired_enabled 已在手机生效；pending 用 attendance_automation_status 查询，request_superseded=true 表示原请求已被后续设置覆盖。
+    instructions: 所有完整时间统一为 yyyy-MM-ddTHH:mm:ss+08:00，full明细的已知时间同样可读；不返回time_zone，纯日期保持yyyy-MM-dd，时长仍为数字。local_execution返回executed_at等可读字段。 此连接提供员工列表、动态员工考勤查询、加班统计、主动打卡和任务状态查询。attendance_query 返回全部日期考勤，attendance_overtime 仅在 days 返回按配置筛选的加班日及全部打卡，并提供 summary；complete=false 时查看 errors，不能把查询失败当成没有加班。可先用 employee_list 获取员工ID；姓名重名时根据候选ID选择，勿猜选。主动打卡仍使用配置的固定员工。仅在用户明确要求打卡时调用 attendance_clock_in；未完成时用 attendance_clock_in_status 查询同一任务，只有 attendance_confirmed=true 才确认有记录。attendance_automation_set 用于明确开关被动自动打卡；开启不补打，关闭不影响主动打卡。手机断网沿用旧开关，只有 sync_state=applied 才可说明当前 desired_enabled 已在手机生效；pending 用 attendance_automation_status 查询，request_superseded=true 表示原请求已被后续设置覆盖。
     type: http
     base_url: http://127.0.0.1:18101
     headers:
@@ -11,7 +11,7 @@ services:
     timeout_seconds: 150
     tools:
       - name: attendance_query
-        description: 查询员工日期范围内的打卡明细，包含首尾日期，默认最多31天，内部按最多7天分段。user_id与user_name二选一，省略时使用默认员工，姓名精确匹配且重名返回候选。detail默认simple，full附上完整上游明细。返回按工作日升序的数组，摘要用户ID脱敏；失败段的日期有error，其他段仍返回。摘要时间为北京时间，成功但无记录不代表旷工或休息。
+        description: 查询员工日期范围内的打卡明细，包含首尾日期，默认最多31天，内部按最多7天分段。user_id与user_name二选一，省略时使用默认员工，姓名精确匹配且重名返回候选。detail默认simple，full附上完整上游明细且已知时间统一为可读北京时间。返回按工作日升序的数组，摘要用户ID脱敏；失败段的日期有error，其他段仍返回。摘要时间为北京时间，成功但无记录不代表旷工或休息。
         method: GET
         path: /api/attendance
         read_only: true
@@ -45,7 +45,7 @@ services:
           - name: detail
             in: query
             required: false
-            description: simple返回摘要，full在各条records的details中附上完整原始字段，包括实际返回的地址、坐标、设备和Wi-Fi等。
+            description: simple返回摘要，full在各条records的details中附上完整字段，已知时间统一为可读的UTC+8字符串，包括实际返回的地址、坐标、设备和Wi-Fi等。
             schema:
               type: string
               enum: [simple, full]
@@ -85,7 +85,7 @@ services:
           - name: detail
             in: query
             required: false
-            description: simple返回摘要，full保留加班日各条records的原始details。
+            description: simple返回摘要，full保留加班日各条records的details，已知时间统一为可读UTC+8字符串。
             schema:
               type: string
               enum: [simple, full]

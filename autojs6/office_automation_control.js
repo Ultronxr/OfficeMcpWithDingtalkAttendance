@@ -1,6 +1,7 @@
 /* 被动自动打卡开关。只同步持久化策略和取消旧子任务，不亮屏、不打开应用、不补建计划。 */
 var source = files.path(String(engines.myEngine().getSource()));
 var folder = String(new java.io.File(source).getParent());
+var time = require(files.join(folder, "office_time.js"));
 var statePath = files.join(folder, ".office-mcp", "automation.json");
 var entryPath = files.join(folder, "autojs6_autowake.js");
 var actions = require(files.join(folder, "office_device_actions.js"));
@@ -56,10 +57,10 @@ function enter() {
 
 /** 同步和取消操作写入固定入口日志，服务端不能指定文件路径。 */
 function record(message) {
-    var line = "[" + new Date().toISOString() + "] " + message;
+    var line = "[" + time.format(Date.now()) + "] " + message;
     log(line);
     try { files.append(entryPath + ".log", line + "\n"); }
-    catch (error) { log("AUTOMATION_LOG_ERROR：开关已处理，文件日志写入失败。"); }
+    catch (error) { log(time.line("AUTOMATION_LOG_ERROR：开关已处理，文件日志写入失败。")); }
 }
 
 /**

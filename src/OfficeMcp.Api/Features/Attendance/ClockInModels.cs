@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using OfficeMcp.Api.Infrastructure.Time;
 
 namespace OfficeMcp.Api.Features.Attendance;
 
@@ -20,9 +21,24 @@ public sealed record ClockInRequest([property: Required] string RequestId, [prop
 public sealed record ClockInTaskResponse(string TaskId, string State, bool IsTerminal, bool AttendanceConfirmed,
     string WorkDate, string CheckType, string UserId, bool DeviceOnline, DateTimeOffset? CommandExpiresAt,
     string? DeviceOutcome, AttendanceRecord? Record, string? Message,
-    string Source, ScheduledClockInReport? LocalExecution, DateTimeOffset CreatedAt,
+    string Source, LocalExecutionResponse? LocalExecution, DateTimeOffset CreatedAt,
     DateTimeOffset? VerificationDeadline, DateTimeOffset? FinishedAt, int VerificationAttempts,
     DateTimeOffset? LastVerifiedAt, string? VerificationError, string? VerificationRelation);
+
+/// <summary>MCP 可读的本地执行摘要；与设备上报的 Unix 毫秒协议分离。</summary>
+public sealed record LocalExecutionResponse(string LocalRunId, string WorkDate, string CheckType,
+    DateTimeOffset ExecutedAt, string Outcome, DateTimeOffset? CompletedAt,
+    DateTimeOffset? ScreenOnAt, DateTimeOffset? AppRequestedAt, string? ErrorCode)
+{
+    /// <summary>只转换输出表示，原始上报、指纹和核验比较继续使用同一毫秒值。</summary>
+    public static LocalExecutionResponse? FromReport(ScheduledClockInReport? report) => report is null ? null :
+        new(report.LocalRunId, report.WorkDate, report.CheckType, OfficeTime.FromUnixMilliseconds(report.ExecutedAtUnixMs),
+            report.Outcome, Convert(report.CompletedAtUnixMs), Convert(report.ScreenOnAtUnixMs),
+            Convert(report.AppRequestedAtUnixMs), report.ErrorCode);
+
+    /// <summary>保留未发生阶段的 null，不补造时间。</summary>
+    private static DateTimeOffset? Convert(long? value) => value.HasValue ? OfficeTime.FromUnixMilliseconds(value.Value) : null;
+}
 
 /// <summary>保留用于比较的钉钉记录标识，不向手机发送这些内部数据。</summary>
 public sealed record ClockInSnapshot(long? RecordId, long? PlanId, DateTimeOffset? PlannedTime,

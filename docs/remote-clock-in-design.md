@@ -106,3 +106,7 @@ AutoJs6 官方实现支持 HTTP 网络请求，因此接收任务和回传结果
 - [钉钉考勤 API 字段](https://developer.alibaba.com/docs/api.htm?apiId=37307)
 - [Android Doze 与 App Standby](https://developer.android.com/training/monitoring-device-state/doze-standby)
 - [Android 后台启动界面限制](https://developer.android.com/guide/components/activities/background-starts)
+
+## 统一时间输出
+
+遵守 [全项目时间规范](time-conventions.md)。创建和查询 Task 的完整时间统一为 `yyyy-MM-ddTHH:mm:ss+08:00`；local_execution 使用 executed_at、completed_at、screen_on_at、app_requested_at 可读字段。设备领取／上报的 Unix 毫秒协议和内部期限比较不改变，避免升级偏移实际任务。

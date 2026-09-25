@@ -8,6 +8,8 @@ AutoJs6 远程打卡与上午本地定时打卡共用持久化 Task 和钉钉 AP
 
 被动自动打卡支持远程开关：`attendance_automation_set` 对应 `POST /api/attendance/automation`，显式传 `enabled`、UUID `request_id`，可选 `wait_seconds`（默认 45）。`attendance_automation_status` 对应同路径 GET。关闭禁止新规划并取消待执行子任务；开启从下一次原定主任务恢复，不补建当天计划，主动打卡和已发生动作的核验不受影响。手机断网沿用本地最后状态，只有 `sync_state=applied` 才代表当前 `desired_enabled` 已在手机生效；HTTP 202 表示仍待同步。规则与持久化边界见 [开发目标](docs/scheduled-clock-in-control-prd.md)。
 
+所有工具共用 [全项目时间规范](docs/time-conventions.md)：完整时间统一为 `yyyy-MM-ddTHH:mm:ss+08:00`，包括 full 明细；不返回 `time_zone`。纯日期仍为 `yyyy-MM-dd`，每日作息时刻带 `+08:00`，时长保持数字。
+
 ## 部署方式
 
 - Linux 示例服务目录为 `/opt/office-mcp`，服务名为 `office-mcp.service`，按实际环境调整。
@@ -51,7 +53,7 @@ X-Api-Key: <本服务的 API Key>
 
 可选入参：`user_id` 与 `user_name` 二选一；都不填时使用默认员工。姓名去除首尾空白后精确匹配；不存在返回 404，重名返回 409，并在 `details.candidates` 提供 ID、姓名和部门，选定 ID 后重试。
 
-`detail` 默认 `simple`，返回打卡摘要。设为 `full` 时，每条 `records` 增加 `details`，保留 `/attendance/listRecord` 返回的完整字段和值，包括实际返回的地址、经纬度、设备、Wi-Fi、记录 ID 等；原始明细中的员工 ID 也保持完整。未返回的字段不会补造，摘要时间仍统一转换为北京时间。
+`detail` 默认 `simple`，返回打卡摘要。设为 `full` 时，每条 `records` 增加 `details`，保留 `/attendance/listRecord` 的完整字段，已知时间字段通过共用工具转换为可读北京时间，非时间值保持原样，包括实际返回的地址、经纬度、设备、Wi-Fi、记录 ID 等；原始明细中的员工 ID 也保持完整。未返回的字段不会补造；摘要与明细时间采用同一固定格式，明细中的数字时间戳不再原样输出。
 
 ```http
 GET /api/attendance?start_date=2026-09-01&end_date=2026-09-14&user_id=test-user-000001&detail=full
@@ -79,7 +81,6 @@ ConvertTo-Json -InputObject $officeResult -Depth 6
   {
     "work_date": "2026-09-10",
     "user_id": "tes**********001",
-    "time_zone": "Asia/Shanghai",
     "records": [
       {
         "check_type": "OnDuty",
@@ -95,7 +96,6 @@ ConvertTo-Json -InputObject $officeResult -Depth 6
   {
     "work_date": "2026-09-11",
     "user_id": "tes**********001",
-    "time_zone": "Asia/Shanghai",
     "records": [],
     "success": false,
     "error": {
@@ -150,11 +150,10 @@ ConvertTo-Json -InputObject $officeResult -Depth 6
 {
   "start_date": "2026-09-10",
   "end_date": "2026-09-10",
-  "time_zone": "Asia/Shanghai",
   "rule": {
-    "work_start_time": "09:00:00",
-    "work_end_time": "18:00:00",
-    "threshold_time": "21:00:00",
+    "work_start_time": "09:00:00+08:00",
+    "work_end_time": "18:00:00+08:00",
+    "threshold_time": "21:00:00+08:00",
     "threshold_inclusive": true,
     "duration_basis": "work_end"
   },
@@ -162,7 +161,6 @@ ConvertTo-Json -InputObject $officeResult -Depth 6
     {
       "work_date": "2026-09-10",
       "user_id": "tes**********001",
-      "time_zone": "Asia/Shanghai",
       "records": [
         {
           "check_type": "OffDuty",

@@ -7,6 +7,7 @@ using Microsoft.OpenApi.Writers;
 using OfficeMcp.Api.Infrastructure.DingTalk;
 using OfficeMcp.Api.Infrastructure.Errors;
 using OfficeMcp.Api.Infrastructure.Security;
+using OfficeMcp.Api.Infrastructure.Time;
 using Swashbuckle.AspNetCore.Swagger;
 
 namespace OfficeMcp.Api.Infrastructure;
@@ -26,9 +27,9 @@ public static class ServiceRegistration
         services.AddAuthorization(options => options.FallbackPolicy = new AuthorizationPolicyBuilder()
             .RequireAuthenticatedUser().Build());
         services.AddProblemDetails();
-        services.ConfigureHttpJsonOptions(options => options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower);
+        services.ConfigureHttpJsonOptions(options => OfficeTime.ConfigureJson(options.SerializerOptions));
         // Swashbuckle 的模型生成器使用 MVC JSON 选项，需与 Minimal API 的实际输出一致。
-        services.Configure<Microsoft.AspNetCore.Mvc.JsonOptions>(options => options.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower);
+        services.Configure<Microsoft.AspNetCore.Mvc.JsonOptions>(options => OfficeTime.ConfigureJson(options.JsonSerializerOptions));
         services.AddExceptionHandler<ApiExceptionHandler>();
         services.AddHealthChecks();
         services.AddSingleton(TimeProvider.System);
@@ -51,7 +52,9 @@ public static class ServiceRegistration
         services.AddEndpointsApiExplorer();
         services.AddSwaggerGen(options =>
         {
-            options.SwaggerDoc("v1", new OpenApiInfo { Title = "Office HTTP API", Version = "v1" });
+            options.SwaggerDoc("v1", new OpenApiInfo { Title = "Office HTTP API", Version = "v1", Description = OfficeTime.Contract });
+            options.SchemaFilter<TimeSchemaFilter>();
+            options.OperationFilter<TimeSchemaFilter>();
             options.IncludeXmlComments(Path.Combine(AppContext.BaseDirectory,
                 $"{Assembly.GetExecutingAssembly().GetName().Name}.xml"));
             options.AddSecurityDefinition("ApiKey", new OpenApiSecurityScheme

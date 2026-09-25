@@ -22,17 +22,16 @@ public sealed record OvertimeRule(TimeOnly WorkStartTime, TimeOnly WorkEndTime, 
 /// <summary>加班范围结果；days 只包含加班日，错误与不完整标记独立返回。</summary>
 /// <param name="StartDate">请求起始工作日。</param>
 /// <param name="EndDate">请求结束工作日。</param>
-/// <param name="TimeZone">固定 Asia/Shanghai。</param>
 /// <param name="Rule">本次配置口径。</param>
 /// <param name="Days">按工作日升序排列的加班日及全部原考勤记录。</param>
 /// <param name="Summary">成功查询日期中的加班汇总。</param>
 /// <param name="Complete">全部请求日期均查询成功才为 true；false 时不能把汇总看作完整统计。</param>
 /// <param name="Errors">原考勤查询失败日期及安全错误，不混入加班日。</param>
-public sealed record OvertimeResponse(DateOnly StartDate, DateOnly EndDate, string TimeZone, OvertimeRule Rule,
+public sealed record OvertimeResponse(DateOnly StartDate, DateOnly EndDate, OvertimeRule Rule,
     IReadOnlyList<OvertimeDay> Days, OvertimeSummary Summary, bool Complete, IReadOnlyList<OvertimeQueryError> Errors);
 
 /// <summary>在原考勤日摘要基础上附加加班数据，保留该日全部 records 和可用姓名。</summary>
-public sealed record OvertimeDay(DateOnly WorkDate, string UserId, string TimeZone,
+public sealed record OvertimeDay(DateOnly WorkDate, string UserId,
     IReadOnlyList<AttendanceRecord> Records, OvertimeInfo Overtime, bool Success = true,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? UserName = null);
 

@@ -28,15 +28,17 @@ public sealed class AutomationStore(IOptions<DeviceCommandOptions> devices, IOpt
         try
         {
             var path = Path.Combine(directory, "state.json");
-            var document = File.Exists(path)
+            var exists = File.Exists(path);
+            var document = exists
                 ? JsonSerializer.Deserialize<AutomationDocument>(File.ReadAllText(path), DeviceCommandStore.JsonOptions)
                     ?? throw new InvalidDataException("自动打卡开关记录无效。")
                 : new AutomationDocument { Version = 1, DeviceId = deviceId, Enabled = true, Revision = 0,
                     LastDisabledRevision = 0, UpdatedAt = clock.GetUtcNow(), Requests = new() };
             Validate(document, deviceId);
             _path = path;
-            // 初始状态也落盘，避免只存在于进程内存而无法审计。
-            Save(document);
+            // 只为首次初始化落盘；读取旧记录不重写格式，避免升级或只读查询改动历史文件。
+            if (exists) _current = document;
+            else Save(document);
             _instanceLock = instanceLock;
         }
         catch { instanceLock.Dispose(); throw; }

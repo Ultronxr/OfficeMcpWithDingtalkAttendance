@@ -72,6 +72,7 @@ function run(queueFailure = false, cooperativeStop = false, controlFailure = fal
         storages: { create: () => ({ get: (key, fallback) => stored.get(key) ?? fallback,
             put(key, value) { stored.set(key, structuredClone(value)); }, remove(key) { stored.delete(key); } }) },
         require(name) {
+            if (name.endsWith("/office_time.js")) return require("../../autojs6/office_time.js");
             if (name.endsWith('/office_attendance_cleanup.js')) return {
                 tick() { events.push('home-tick'); },
                 pump(request, deviceId) {

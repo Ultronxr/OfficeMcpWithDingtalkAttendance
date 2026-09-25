@@ -1,6 +1,7 @@
 /* 打卡收尾：持久化最近一次动作归属，取得终态或打开钉钉三分钟后请求桌面，不改变考勤结果。 */
 var source = files.path(String(engines.myEngine().getSource()));
 var folder = String(new java.io.File(source).getParent());
+var time = require(files.join(folder, "office_time.js"));
 var statePath = files.join(folder, ".office-mcp", "attendance-cleanup.json");
 var actions = require(files.join(folder, "office_device_actions.js"));
 var terminalStates = ["succeeded", "already_completed", "failed", "expired", "unconfirmed"];
@@ -37,12 +38,12 @@ function save(value) {
 
 /** 把必要标识及动作阶段写入固定日志；日志故障不能改变已持久化的收尾事实。 */
 function record(value, message) {
-    var line = "[" + new Date().toISOString() + "] " + message + "，source=" + (value.source || "manual") +
+    var line = "[" + time.format(Date.now()) + "] " + message + "，source=" + (value.source || "manual") +
         "，run_id=" + (value.run_id || value.owner_id) + "，task_id=" + (value.task_id || "未关联");
     log(line);
     var name = value.source === "remote_command" ? "office_remote_listener.js.log" : "autojs6_autowake.js.log";
     try { files.append(files.join(folder, name), line + "\n"); }
-    catch (error) { log("[Office MCP] HOME_LOG_ERROR：收尾文件日志写入失败。"); }
+    catch (error) { log(time.line("[Office MCP] HOME_LOG_ERROR：收尾文件日志写入失败。")); }
 }
 
 /**
@@ -93,7 +94,7 @@ function finish(value, result) {
     if (value.source === "remote_command") {
         var actual = result.record && result.record.actual_check_time;
         record(value, "VERIFY_RESULT：state=" + result.state + "，attendance_confirmed=" + result.attendance_confirmed +
-            "，实际打卡=" + (actual || "无") + "，核验次数=" + (result.verification_attempts || 0));
+            "，实际打卡=" + (actual ? time.format(actual) : "无") + "，核验次数=" + (result.verification_attempts || 0));
     }
 }
 

@@ -35,12 +35,12 @@ flowchart LR
 - 每个日期包含 `success`；某段上游调用失败时，该段所有日期返回 `success: false` 和 `error`，不丢弃其他段结果。`error` 包含安全错误码、说明和可用的钉钉错误码。
 - 每条记录包含上下班类型、计划时间、实际时间、中文状态和原始状态码。
 - 使用 `/attendance/listRecord` 顶层 `recordresult` 打卡明细，以 `workDate` 归属日期。保留同一时段不同流水，同一记录 ID 保留较新版本；不重新判断迟到、计算工时或补造缺卡记录。
-- `detail=simple`（默认）输出摘要；`detail=full` 附上每条记录的完整原始字段和值，摘要时间转换不改变原始明细。
+- `detail=simple`（默认）输出摘要；`detail=full` 附上每条记录的完整字段；已知时间与摘要共用工具类输出北京时间，其他原始值不变。
 - `GET /api/employees` 对应 `employee_list`，通过 `/topapi/v2/user/list` 分页和 `/topapi/v2/department/listsub` 递归，返回应用可见员工的完整 ID、姓名和部门；可选 `user_name` 按包含关系筛选。
 - 目录完整读取后缓存五分钟，任何页或部门失败均不发布部分目录，避免错误判断姓名唯一性。按 ID 查询无需访问通讯录。
 - 未打卡时间返回 `null`；仅当 `success: true` 时，空记录表示钉钉没有返回结果，不能推断成旷工或休息。
 - 未识别状态返回“未知状态”，同时保留原始码。
-- 返回时间带 `+08:00`，不受宿主机本地时区影响。钉钉无时区字符串按北京时间解析。
+- 全项目必须遵守 [时间规范](time-conventions.md)：HTTP、完整明细、日志和新产生的状态日期时间共用 `OfficeTime`，手机使用 `office_time.js`；对外显示到秒并带 `+08:00`，内部状态保留原精度，不输出 `time_zone`。钉钉无偏移时间按北京时间解析；设备 Unix 毫秒协议与时长不平移。
 - `GET /openapi/v1.json` 提供文档，查询 operationId 为 `attendance_query`、`employee_list`。文档和业务均要求 `X-Api-Key`。
 - `GET /healthz` 匿名，仅表示宿主进程存活，不调用钉钉，也不证明外部 API 可用。
 

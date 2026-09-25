@@ -7,6 +7,7 @@
     var selfPath = files.path(String(engines.myEngine().getSource()));
     // AutoJs6 的 files 未提供 dirname；通过 Android 自带的 Java File 取得脚本目录。
     var folder = String(new java.io.File(selfPath).getParent());
+    var time = require(files.join(folder, "office_time.js"));
     var actions = require(files.join(folder, "office_device_actions.js"));
     var attendanceQueue = null;
     var automationControl = null;
@@ -17,7 +18,7 @@
     var store;
 
     /** 记录阶段和任务 ID；不记录 URL、请求头、响应原文或凭据。 */
-    function report(message) { log("[Office MCP] " + message); }
+    function report(message) { log(time.line("[Office MCP] " + message)); }
 
     /** 每轮显式检查中断与本引擎停止标记，避免长轮询和宽泛异常处理吞掉停止请求。 */
     function stopRequested() {

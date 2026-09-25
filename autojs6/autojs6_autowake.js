@@ -9,7 +9,7 @@
  * 日期、星期、循环规则由 AutoJs6 自带的定时任务编排。
  * random 模式不长时间 sleep；主脚本登记子任务后退出。
  * 在 [randomStart, randomEnd - delayBufferSeconds] 中随机登记，延迟后仍只在原窗口内发起动作。
- * 所有时间采用手机本地时间；随机窗口不能跨午夜。
+ * 业务时间统一采用北京时间（UTC+8）；随机窗口不能跨午夜。
  * 同一文件每天只生成一个有效计划；不同窗口请使用不同文件。
  * 不要同时运行同一文件的多个规划实例。
  *
@@ -61,20 +61,13 @@ var CONFIG = {
 
 (function () {
     var selfPath = files.path(String(engines.myEngine().getSource()));
+    var time = require(files.join(String(new java.io.File(selfPath).getParent()), "office_time.js"));
     var store;
     var state;
     var automationGuard = null;
 
-    function pad(n) {
-        return n < 10 ? "0" + n : String(n);
-    }
-
-    function stamp(value) {
-        var d = new Date(value);
-        return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" +
-            pad(d.getDate()) + " " + pad(d.getHours()) + ":" +
-            pad(d.getMinutes()) + ":" + pad(d.getSeconds());
-    }
+    /** 通过共用时间模块格式化日志与计划时刻，固定 UTC+8。 */
+    function stamp(value) { return time.format(value); }
 
     function report(message) {
         var line = "[" + stamp(Date.now()) + "] " + message;
@@ -84,7 +77,7 @@ var CONFIG = {
             try {
                 files.append(selfPath + ".log", line + "\n");
             } catch (e) {
-                log("文件日志写入失败，不影响主流程：" + String(e));
+                log(time.line("文件日志写入失败，不影响主流程：" + String(e)));
             }
         }
     }
@@ -117,31 +110,8 @@ var CONFIG = {
         return value;
     }
 
-    function todayAt(text, now) {
-        var m = /^(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(text);
-
-        if (!m) {
-            throw new Error(
-                "时间格式必须是 HH:mm 或 HH:mm:ss：" + text
-            );
-        }
-
-        var h = integer(Number(m[1]), 0, 23, "小时");
-        var mi = integer(Number(m[2]), 0, 59, "分钟");
-        var s = integer(Number(m[3] || 0), 0, 59, "秒");
-
-        var d = new Date(now);
-        d.setHours(h, mi, s, 0);
-
-        // 拒绝夏令时跳变造成的不存在的本地时刻。
-        if (d.getHours() !== h ||
-            d.getMinutes() !== mi ||
-            d.getSeconds() !== s) {
-            throw new Error("当天不存在这个本地时刻：" + text);
-        }
-
-        return d.getTime();
-    }
+    /** 配置时刻按北京时间今天解释，已有任务仍按原毫秒时间执行。 */
+    function todayAt(text, now) { return time.todayAt(text, now); }
 
     function taskId() {
         var args = engines.myEngine().execArgv;
@@ -186,7 +156,7 @@ var CONFIG = {
 
     /** 动作前登记本地事实；只处理上午随机计划，不在规划阶段联系服务端。 */
     function beginVerification(p) {
-        if (CONFIG.verifyScheduledAttendance !== true || new Date(p.at).getHours() >= 12) return null;
+        if (CONFIG.verifyScheduledAttendance !== true || time.hour(p.at) >= 12) return null;
         try {
             var folder = String(new java.io.File(selfPath).getParent());
             var queue = require(files.join(folder, "office_attendance_queue.js"));

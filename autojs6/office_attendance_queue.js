@@ -1,6 +1,7 @@
 /* 本地执行事实与核验结果队列。模块只保存和上报事实，永远不执行手机动作。 */
 var source = files.path(String(engines.myEngine().getSource()));
 var folder = String(new java.io.File(source).getParent());
+var time = require(files.join(folder, "office_time.js"));
 var directory = files.join(folder, ".office-mcp", "attendance");
 var actions = require(files.join(folder, "office_device_actions.js"));
 
@@ -25,7 +26,7 @@ function read(id) { return JSON.parse(String(new java.lang.String(atomic(id).rea
 
 /** 写回入口日志和控制台；日志只取本地标识、固定状态及必要考勤时间。 */
 function record(entry, message) {
-    var line = "[" + new Date().toISOString() + "] " + message + "，local_run_id=" + entry.report.local_run_id;
+    var line = "[" + time.format(Date.now()) + "] " + message + "，local_run_id=" + entry.report.local_run_id;
     log(line);
     // 只向同目录原入口的日志追加，服务端不能指定写入路径。
     if (entry.log_name && /^[^/\\]+\.js\.log$/.test(entry.log_name)) files.append(files.join(folder, entry.log_name), line + "\n");
@@ -92,12 +93,12 @@ function writeFinal(entry) {
         if (!cleanup.localTerminal(entry.report.local_run_id, terminal)) return;
     } catch (error) {
         // 收尾状态损坏不能卡住整条事实队列；其独立截止检查仍会在状态可用时继续。
-        log("[Office MCP] HOME_STORAGE_ERROR：核验结果已取得，但收尾通知失败；考勤结果继续归档。");
+        log(time.line("[Office MCP] HOME_STORAGE_ERROR：核验结果已取得，但收尾通知失败；考勤结果继续归档。"));
     }
     var attendance = result.record || {};
     record(entry, "VERIFY_RESULT：task_id=" + result.task_id + "，state=" + result.state +
         "，attendance_confirmed=" + result.attendance_confirmed + "，relation=" + (result.verification_relation || "none") +
-        "，实际打卡=" + (attendance.actual_check_time || "无") + "，考勤状态=" + (attendance.status_code || "无") +
+        "，实际打卡=" + (attendance.actual_check_time ? time.format(attendance.actual_check_time) : "无") + "，考勤状态=" + (attendance.status_code || "无") +
         "，核验次数=" + (result.verification_attempts || 0) +
         "，核验错误=" + String(result.verification_error || "无").replace(/[\r\n]/g, " ").slice(0, 256));
     entry.state = "done";
@@ -160,7 +161,7 @@ function pump(request, deviceId) {
                 save(entry);
             }
         } catch (error) {
-            log("[Office MCP] VERIFY_STORAGE_ERROR：执行记录=" + id + "，请检查本地队列文件；不会重做动作。");
+            log(time.line("[Office MCP] VERIFY_STORAGE_ERROR：执行记录=" + id + "，请检查本地队列文件；不会重做动作。"));
         } finally { guard.release(); }
     });
     return pending;

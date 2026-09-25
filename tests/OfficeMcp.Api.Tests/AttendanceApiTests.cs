@@ -67,7 +67,7 @@ public sealed class AttendanceApiTests
         Assert.True(root.GetProperty("success").GetBoolean());
         Assert.Equal("tes**********001", root.GetProperty("user_id").GetString());
         Assert.Equal("2026-09-10", root.GetProperty("work_date").GetString());
-        Assert.Equal("Asia/Shanghai", root.GetProperty("time_zone").GetString());
+        Assert.False(root.TryGetProperty("time_zone", out _));
         var records = root.GetProperty("records");
         Assert.Equal(4, records.GetArrayLength());
         Assert.Equal("迟到", records[0].GetProperty("status").GetString());

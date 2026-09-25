@@ -2,6 +2,8 @@ using OfficeMcp.Api.Features.Attendance;
 using OfficeMcp.Api.Infrastructure;
 using OfficeMcp.Api.Features.DeviceCommands;
 using OfficeMcp.Api.Features.Employees;
+using OfficeMcp.Api.Infrastructure.Time;
+using Microsoft.Extensions.Logging.Console;
 
 /// <summary>通用办公 HTTP 服务入口；NSSM 可直接托管发布后的可执行文件。</summary>
 public partial class Program
@@ -19,7 +21,8 @@ public partial class Program
         builder.Configuration.AddJsonFile("appsettings.Local.json", optional: true, reloadOnChange: false)
             .AddEnvironmentVariables().AddCommandLine(args);
         builder.Logging.ClearProviders();
-        builder.Logging.AddJsonConsole();
+        builder.Logging.AddConsole(options => options.FormatterName = BeijingJsonConsoleFormatter.FormatterName)
+            .AddConsoleFormatter<BeijingJsonConsoleFormatter, ConsoleFormatterOptions>();
         builder.Services.AddOfficeInfrastructure(builder.Configuration);
         builder.Services.AddAttendanceFeature(builder.Configuration);
         builder.Services.AddEmployeeFeature();

@@ -1,3 +1,4 @@
+using OfficeMcp.Api.Infrastructure.Time;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
@@ -41,7 +42,7 @@ public sealed partial class ClockInService
         }
         if (report.Outcome == "launch_requested" && report.AppRequestedAtUnixMs is null)
             throw new ApiRequestException(400, "invalid_execution_time", "启动成功回执必须提供实际启动请求时间。");
-        if (DateOnly.FromDateTime(executedAt.ToOffset(TimeSpan.FromHours(8)).DateTime) != workDate)
+        if (OfficeTime.WorkDate(executedAt) != workDate)
             throw new ApiRequestException(400, "invalid_work_date", "执行时间与北京时间工作日不一致。");
 
         report = report with { LocalRunId = runId.ToString("N") };
@@ -58,7 +59,7 @@ public sealed partial class ClockInService
         }
         // 仅首次接受要求当天；跨日重传已接受的事实仍返回原任务，避免成功响应丢失后无法归档。
         var now = clock.GetUtcNow();
-        if (workDate != DateOnly.FromDateTime(now.ToOffset(TimeSpan.FromHours(8)).DateTime))
+        if (workDate != OfficeTime.WorkDate(now))
             throw new ApiRequestException(400, "local_report_date_expired", "仅接受北京时间当天的首次执行补报。");
         if (LocalTimestamp(previous) > now.AddSeconds(30))
             throw new ApiRequestException(400, "device_clock_ahead", "手机执行时间超前服务器超过 30 秒。");
@@ -94,7 +95,7 @@ public sealed partial class ClockInService
     {
         if (value < 0 || value > 253402271999999)
             throw new ApiRequestException(400, "invalid_execution_time", "执行时间必须是有效的 UTC Unix 毫秒时间戳。");
-        return DateTimeOffset.FromUnixTimeMilliseconds(value);
+        return OfficeTime.FromUnixMilliseconds(value);
     }
 
     /// <summary>无事前基线时只判定日期和执行时间关系；迟到可以确认，未知状态保留为未确认。</summary>
@@ -104,7 +105,7 @@ public sealed partial class ClockInService
         if (!IsRecorded(current)) return "unknown_status";
         if (metadata.LocalExecution is null) return "execution_context_missing";
         var actual = current.ActualTime.Value;
-        if (actual.ToOffset(TimeSpan.FromHours(8)).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) != metadata.WorkDate)
+        if (OfficeTime.WorkDate(actual).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) != metadata.WorkDate)
             return "outside_execution_window";
         var executed = LocalTimestamp(metadata.LocalExecution.ExecutedAtUnixMs);
         if (actual > now.AddSeconds(30) || actual > executed.AddSeconds(job.VerificationTimeoutSeconds + 30))

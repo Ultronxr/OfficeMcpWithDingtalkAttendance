@@ -1,4 +1,5 @@
 /* AutoJs6 共用动作：定时和远程入口使用同一把设备文件锁，不改变钉钉自身打卡规则。 */
+var time = require(files.join(String(new java.io.File(files.path(String(engines.myEngine().getSource()))).getParent()), "office_time.js"));
 // 接收器的网络循环与本地收尾线程共享模块，使用线程安全集合保存退出时待释放的锁。
 var heldLocks = new java.util.concurrent.CopyOnWriteArrayList();
 
@@ -13,7 +14,7 @@ events.on("exit", releaseAll);
  * 获取跨脚本引擎的设备文件锁；等待受超时和动作截止时间双重约束。
  * @param {string} name 固定锁名，由本地代码指定。
  * @param {number} timeoutMs 最长等待毫秒数。
- * @param {number|null} deadline 动作最晚开始时间，手机本地时间戳。
+ * @param {number|null} deadline 动作最晚开始时刻的 Unix 毫秒，不随手机时区平移。
  * @returns {Object|null} 可释放锁；超时返回 null。
  */
 function acquire(name, timeoutMs, deadline) {
@@ -164,5 +165,5 @@ function wakeAndLaunch(config, keepSeconds, deadline, report, stage, attendanceR
 if (typeof module !== "undefined" && module.exports != null) {
     module.exports = { acquire: acquire, wakeAndLaunch: wakeAndLaunch, releaseAll: releaseAll };
 } else {
-    log("[Office MCP] 这是共用动作模块，无需单独运行。远程接收请运行 office_remote_listener.js；定时打卡请配置 autojs6_autowake.js。");
+    log(time.line("[Office MCP] 这是共用动作模块，无需单独运行。远程接收请运行 office_remote_listener.js；定时打卡请配置 autojs6_autowake.js。"));
 }

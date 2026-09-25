@@ -1,11 +1,11 @@
 using Microsoft.Extensions.Options;
+using OfficeMcp.Api.Infrastructure.Time;
 
 namespace OfficeMcp.Api.Features.Attendance;
 
 /// <summary>在已有考勤范围查询之上按固定作息筛选加班日，不增加钉钉请求或设备动作。</summary>
 public sealed class OvertimeService(AttendanceService attendance, IOptions<OvertimeOptions> options)
 {
-    private static readonly TimeSpan ChinaOffset = TimeSpan.FromHours(8);
 
     /// <summary>一次复用考勤查询，分离失败日期，按工作日最晚下班卡计算加班并汇总。</summary>
     /// <param name="query">与原考勤工具共用的已校验日期、员工和明细参数。</param>
@@ -38,19 +38,19 @@ public sealed class OvertimeService(AttendanceService attendance, IOptions<Overt
             if (lastOffDuty.Value < thresholdAt) continue;
             var normalEnd = At(day.WorkDate, rule.WorkEndTime);
             var seconds = (lastOffDuty.Value - normalEnd).Ticks / (decimal)TimeSpan.TicksPerSecond;
-            overtimeDays.Add(new(day.WorkDate, day.UserId, day.TimeZone, day.Records,
+            overtimeDays.Add(new(day.WorkDate, day.UserId, day.Records,
                 new OvertimeInfo(At(day.WorkDate, rule.WorkStartTime), normalEnd, thresholdAt,
                     lastOffDuty.Value, seconds, Hours(seconds)), UserName: day.UserName));
         }
 
         var totalSeconds = overtimeDays.Sum(day => day.Overtime.OvertimeSeconds);
-        return new(query.StartDate, query.EndDate, "Asia/Shanghai", rule, overtimeDays,
+        return new(query.StartDate, query.EndDate, rule, overtimeDays,
             new(overtimeDays.Count, totalSeconds, Hours(totalSeconds)), errors.Count == 0, errors);
     }
 
     /// <summary>将工作日和配置时刻组合为北京时间，不受运行服务器本地时区影响。</summary>
     private static DateTimeOffset At(DateOnly day, TimeOnly time) =>
-        new(day.ToDateTime(time, DateTimeKind.Unspecified), ChinaOffset);
+        new(day.ToDateTime(time, DateTimeKind.Unspecified), OfficeTime.Offset);
 
     /// <summary>小时数只用于展示；精确秒数保留在响应中，支持调用方按自身精度使用。</summary>
     private static decimal Hours(decimal seconds) => Math.Round(seconds / 3600m, 2, MidpointRounding.AwayFromZero);

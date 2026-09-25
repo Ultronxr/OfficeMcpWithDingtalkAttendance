@@ -1,16 +1,15 @@
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using OfficeMcp.Api.Infrastructure.Errors;
+using OfficeMcp.Api.Infrastructure.Time;
 
 namespace OfficeMcp.Api.Features.DeviceCommands;
 
 /// <summary>单实例命令存储：进程锁串行化领取，原子替换文件保证重启后仍可核验。</summary>
 public sealed class DeviceCommandStore(IOptions<DeviceCommandOptions> options, TimeProvider clock) : IDisposable
 {
-    public static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
-    };
+    // 内部状态保存原精度；公开 HTTP 使用默认秒级配置，避免展示需求改变重启后的期限。
+    public static readonly JsonSerializerOptions JsonOptions = OfficeTime.CreateJsonOptions(preservePrecision: true);
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly Dictionary<string, DeviceCommandJob> _jobs = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTimeOffset> _seen = new(StringComparer.Ordinal);

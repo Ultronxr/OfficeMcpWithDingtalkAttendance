@@ -35,7 +35,7 @@ public static class AttendanceEndpoints
         group.MapGet("/attendance", QueryAsync)
             .WithName("attendance_query").WithTags("Attendance")
             .WithSummary("查询员工日期范围内的打卡明细")
-            .WithDescription("start_date 和 end_date 必填，格式 yyyy-MM-dd，包含首尾日期，自动按最多七天分段。user_id、user_name 可选其一，都不填使用默认员工；姓名精确匹配，重名返回候选 ID。detail 默认 simple，full 附上完整原始明细。结果按工作日升序，失败段的日期 success=false，其他段仍返回。摘要时间为北京时间。")
+            .WithDescription("start_date 和 end_date 必填，格式 yyyy-MM-dd，包含首尾日期，自动按最多七天分段。user_id、user_name 可选其一，都不填使用默认员工；姓名精确匹配，重名返回候选 ID。detail 默认 simple，full 附上完整明细且已知时间统一为可读北京时间。结果按工作日升序，失败段的日期 success=false，其他段仍返回。摘要时间为北京时间。")
             .ProducesProblem(401).ProducesProblem(404).ProducesProblem(409)
             .ProducesProblem(500).ProducesProblem(502).ProducesProblem(504);
         group.MapGet("/attendance/overtime", QueryOvertimeAsync)

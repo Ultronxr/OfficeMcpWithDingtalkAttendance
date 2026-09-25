@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using OfficeMcp.Api.Features.Employees;
 using OfficeMcp.Api.Infrastructure.DingTalk;
 using OfficeMcp.Api.Infrastructure.Errors;
+using OfficeMcp.Api.Infrastructure.Time;
 
 namespace OfficeMcp.Api.Features.Attendance;
 
@@ -115,7 +116,8 @@ public sealed class AttendanceService(DingTalkClient dingTalk, EmployeeService e
                 var workDate = DateOnly.FromDateTime(value.WorkDate.Value.DateTime);
                 if (workDate < start || workDate > end)
                     throw new UpstreamException("dingtalk_date_mismatch", "钉钉返回的工作日不在请求分段内。");
-                parsed.Add((value, raw));
+                // full 的已知时间也必须可读；在当前错误隔离范围内拒绝无效上游时间。
+                parsed.Add((value, fullDetail ? OfficeTime.NormalizeDetails(raw) : raw));
             }
         }
         catch (JsonException)
@@ -138,7 +140,7 @@ public sealed class AttendanceService(DingTalkClient dingTalk, EmployeeService e
                     "OnDuty" => "上班", "OffDuty" => "下班", _ => "未知类型"
                 }, x.Value.PlanCheckTime ?? x.Value.BaseCheckTime, x.Value.UserCheckTime,
                     x.Value.TimeResult, TranslateStatus(x.Value.TimeResult), fullDetail ? x.Raw.Clone() : null)).ToArray();
-            return new AttendanceResponse(workDate, MaskUserId(userId), "Asia/Shanghai", records, UserName: userName);
+            return new AttendanceResponse(workDate, MaskUserId(userId), records, UserName: userName);
         }).ToArray();
     }
 
@@ -148,7 +150,7 @@ public sealed class AttendanceService(DingTalkClient dingTalk, EmployeeService e
     /// <param name="userName">已解析的姓名，可为空。</param>
     /// <param name="error">可安全展示的错误。</param>
     private static AttendanceResponse CreateFailure(DateOnly workDate, string userId, string? userName, AttendanceError error) =>
-        new(workDate, MaskUserId(userId), "Asia/Shanghai", [], Success: false, Error: error, UserName: userName);
+        new(workDate, MaskUserId(userId), [], Success: false, Error: error, UserName: userName);
 
     /// <summary>保留用户 ID 首尾各三位，中间逐位替换为星号；短 ID 全部隐藏。</summary>
     /// <param name="userId">所选员工的完整 ID。</param>

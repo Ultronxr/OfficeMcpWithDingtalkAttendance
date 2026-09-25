@@ -5,7 +5,7 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
-process.env.TZ = 'Asia/Shanghai';
+process.env.TZ = process.env.OFFICE_TEST_TZ || 'Asia/Shanghai';
 const scriptPath = '/storage/emulated/0/脚本/自动打卡/autojs6_autowake.js';
 const scriptFolder = path.posix.dirname(scriptPath);
 const entrySource = fs.readFileSync(path.resolve(__dirname, '../../autojs6/autojs6_autowake.js'), 'utf8');
@@ -183,6 +183,11 @@ function run(options = {}) {
     };
     const context = vm.createContext({ ...api });
     context.require = requested => {
+        if (requested === path.posix.join(scriptFolder, "office_time.js")) {
+            const moduleContext = { ...api, module: { exports: {} } };
+            vm.runInNewContext(fs.readFileSync(path.resolve(__dirname, "../../autojs6/office_time.js"), "utf8"), moduleContext);
+            return moduleContext.module.exports;
+        }
         if (requested === path.posix.join(scriptFolder, 'office_attendance_cleanup.js')) {
             if (!loadedCleanup) {
                 const moduleContext = { ...api, require: context.require, module: { exports: {} } };
