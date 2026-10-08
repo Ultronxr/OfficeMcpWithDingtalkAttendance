@@ -24,6 +24,18 @@ public sealed class AttendanceService(DingTalkClient dingTalk, EmployeeService e
     /// <param name="cancellationToken">客户端取消标记。</param>
     /// <returns>按工作日升序排列，每个日期恰好一个元素。</returns>
     public async Task<AttendanceResponse[]> QueryAsync(DateOnly startDate, DateOnly endDate,
+        string? userId, string? userName, bool fullDetail, CancellationToken cancellationToken) =>
+        (await QueryWithEmployeeAsync(startDate, endDate, userId, userName, fullDetail, cancellationToken)).Days;
+
+    /// <summary>内部保留已解析的员工 ID，供加班分类复用；完整 ID 不进入公开考勤响应。</summary>
+    /// <param name="startDate">北京时间的起始工作日。</param>
+    /// <param name="endDate">包含当天的结束工作日。</param>
+    /// <param name="userId">可选完整员工 ID。</param>
+    /// <param name="userName">可选精确姓名；与 ID 互斥，且仅解析一次。</param>
+    /// <param name="fullDetail">是否保留可读的原始明细。</param>
+    /// <param name="cancellationToken">客户端取消标记。</param>
+    /// <returns>内部员工 ID 和沿用原有契约的逐日考勤。</returns>
+    internal async Task<ResolvedAttendanceQuery> QueryWithEmployeeAsync(DateOnly startDate, DateOnly endDate,
         string? userId, string? userName, bool fullDetail, CancellationToken cancellationToken)
     {
         var dayCount = endDate.DayNumber - startDate.DayNumber + 1;
@@ -81,8 +93,8 @@ public sealed class AttendanceService(DingTalkClient dingTalk, EmployeeService e
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        return results.Select((result, index) => result ?? CreateFailure(startDate.AddDays(index), selectedId, selectedName,
-            new AttendanceError("attendance_query_timeout", "日期范围查询超时，此日期尚未完成，请单独重试。"))).ToArray();
+        return new(selectedId, results.Select((result, index) => result ?? CreateFailure(startDate.AddDays(index), selectedId, selectedName,
+            new AttendanceError("attendance_query_timeout", "日期范围查询超时，此日期尚未完成，请单独重试。"))).ToArray());
     }
 
     /// <summary>读取一个不超过七天的闭区间，校验员工和工作日，按记录 ID 去重并整理摘要。</summary>

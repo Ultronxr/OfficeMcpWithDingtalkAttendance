@@ -28,7 +28,7 @@ X-Api-Key: {{officeApiKey}}
 GET {{baseUrl}}/openapi/v1.json
 X-Api-Key: {{officeApiKey}}
 
-### 查询加班日，默认21:00（含）起算，达到门槛后从18:00计算时长
+### 查询加班及待核验出勤：工作日默认21:00（含）门槛，休息日／节假日有记录即返回，缺卡不隐藏
 GET {{baseUrl}}/api/attendance/overtime?start_date=2026-09-01&end_date=2026-09-14
 X-Api-Key: {{officeApiKey}}
 

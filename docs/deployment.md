@@ -22,6 +22,10 @@
 
 网关配置参考 [OpenAPI 示例](../deploy/gateway-office.openapi.yaml) 或 [HTTP 示例](../deploy/gateway-office.http.yaml)，二选一合并到已有服务。网关与后端同机时使用回环地址；凭据从网关自己的私密环境中读取。保留已有认证设置，不用示例整体覆盖线上配置。
 
+## 非工作日加班查询升级
+
+本次更新后端并刷新网关 OpenAPI／工具说明，工具名及五个参数保持不变。部署前确认原生 `getattcolumns` 和 `getcolumnval` 在当前应用下可读；部署后只读验证历史工作日、休息日白天完整卡及缺卡日期。确认 `day_type`、`anomalies`、nullable 时长和 `summary.duration_complete` 已在工具定义与真实响应中生效。仅检查 healthz 不足以确认该功能可用。保留配置、自动开关和所有 Task 数据，手机脚本不参与此次查询能力升级。
+
 ## Windows 可选部署
 
 `scripts/publish.ps1` 生成 Windows 发布程序，`scripts/install-nssm.ps1` 可注册服务；需要目标主机具备相应 ASP.NET Core 运行时。NSSM 路径、发布目录和服务名可通过脚本参数指定，具体示例见 [项目 README](../README.md)。

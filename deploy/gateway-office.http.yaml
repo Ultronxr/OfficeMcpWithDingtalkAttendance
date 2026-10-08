@@ -3,7 +3,7 @@
 services:
   - name: office_common_tools
     title: 办公服务 · 考勤
-    instructions: 所有完整时间统一为 yyyy-MM-ddTHH:mm:ss+08:00，full明细的已知时间同样可读；不返回time_zone，纯日期保持yyyy-MM-dd，时长仍为数字。local_execution返回executed_at等可读字段。 此连接提供员工列表、动态员工考勤查询、加班统计、主动打卡和任务状态查询。attendance_query 返回全部日期考勤，attendance_overtime 仅在 days 返回按配置筛选的加班日及全部打卡，并提供 summary；complete=false 时查看 errors，不能把查询失败当成没有加班。可先用 employee_list 获取员工ID；姓名重名时根据候选ID选择，勿猜选。主动打卡仍使用配置的固定员工。仅在用户明确要求打卡时调用 attendance_clock_in；未完成时用 attendance_clock_in_status 查询同一任务，只有 attendance_confirmed=true 才确认有记录。attendance_automation_set 用于明确开关被动自动打卡；开启不补打，关闭不影响主动打卡。手机断网沿用旧开关，只有 sync_state=applied 才可说明当前 desired_enabled 已在手机生效；pending 用 attendance_automation_status 查询，request_superseded=true 表示原请求已被后续设置覆盖。
+    instructions: 所有完整时间统一为 yyyy-MM-ddTHH:mm:ss+08:00，full明细的已知时间同样可读；不返回time_zone，纯日期保持yyyy-MM-dd，时长仍为数字。local_execution返回executed_at等可读字段。 此连接提供员工列表、动态员工考勤查询、加班统计、主动打卡和任务状态查询。attendance_query 返回全部日期考勤。attendance_overtime 工作日按配置门槛，非工作日（含安排休息的节假日）有任意记录就返回全部打卡，缺卡不隐藏；day_type=unknown、overtime_confirmed=null 表示待核验，不计入已确认加班。anomalies 标明异常，时长无法核算返回null。必须检查summary.duration_complete，false时总时长仅覆盖可核算部分；complete=false时查看errors，不能把失败或钉钉加班列为零解释成没有加班。可先用 employee_list 获取员工ID；姓名重名时根据候选ID选择，勿猜选。主动打卡仍使用配置的固定员工。仅在用户明确要求打卡时调用 attendance_clock_in；未完成时用 attendance_clock_in_status 查询同一任务，只有 attendance_confirmed=true 才确认有记录。attendance_automation_set 用于明确开关被动自动打卡；开启不补打，关闭不影响主动打卡。手机断网沿用旧开关，只有 sync_state=applied 才可说明当前 desired_enabled 已在手机生效；pending 用 attendance_automation_status 查询，request_superseded=true 表示原请求已被后续设置覆盖。
     type: http
     base_url: http://127.0.0.1:18101
     headers:
@@ -51,7 +51,7 @@ services:
               enum: [simple, full]
               default: simple
       - name: attendance_overtime
-        description: 复用日期范围考勤查询，只在days返回加班日及当天全部打卡，另附summary、complete和errors。按服务端固定时间配置判断，默认09:00上班、18:00下班、21:00（含）为门槛；有实际OffDuty才参与，同工作日取最晚下班卡，达到门槛后从18:00计时，例如21:30为3.5小时。跨午夜按work_date归属，不使用钉钉计划时间。缺下班卡直接排除；查询失败不能当成未加班。参数、姓名选择、simple/full与attendance_query相同；实际规则以响应rule为准。
+        description: 复用考勤查询并读取钉钉原生休息安排，返回加班日及分类未知候选的全部记录。工作日最晚OffDuty达到配置门槛（默认21:00含）后从正常下班（默认18:00）计时；非工作日包括安排休息的节假日，有任意记录即返回，不要求21:00或双卡。完整卡按最早OnDuty至最晚OffDuty计时，不扣餐休；缺卡、未知类型、逆序以anomalies标记，无法核算时长为null，不能隐藏日期。分类失败保留day_type=unknown、overtime_confirmed=null，不能计入已确认汇总。必须检查summary.duration_complete及complete/errors；不能把钉钉加班列为零当作没有加班。参数、姓名选择及simple/full与attendance_query相同。
         method: GET
         path: /api/attendance/overtime
         read_only: true

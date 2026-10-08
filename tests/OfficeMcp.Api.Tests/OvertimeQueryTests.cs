@@ -54,9 +54,9 @@ public sealed class OvertimeQueryTests
         {
             var day = Assert.Single(result.Days);
             Assert.Equal(new DateOnly(2026, 9, 10), day.WorkDate);
-            Assert.Equal("2026-09-10T18:00:00+08:00", day.Overtime.NormalWorkEnd.ToString("yyyy-MM-ddTHH:mm:sszzz"));
+            Assert.Equal("2026-09-10T18:00:00+08:00", day.Overtime.NormalWorkEnd!.Value.ToString("yyyy-MM-ddTHH:mm:sszzz"));
             Assert.Equal(result.Summary.TotalOvertimeSeconds, day.Overtime.OvertimeSeconds);
-            Assert.Equal(TimeSpan.FromHours(8), day.Overtime.LastOffDutyAt.Offset);
+            Assert.Equal(TimeSpan.FromHours(8), day.Overtime.LastOffDutyAt!.Value.Offset);
         }
         Assert.Equal(1, factory.Handler.AttendanceCalls);
         Assert.Equal(0, factory.Handler.VerificationCalls);
@@ -123,8 +123,8 @@ public sealed class OvertimeQueryTests
         var result = await Query(client);
         Assert.Equal(new TimeOnly(20, 0), result.Rule.ThresholdTime);
         var day = Assert.Single(result.Days);
-        Assert.Equal(8, day.Overtime.NormalWorkStart.Hour);
-        Assert.Equal(17, day.Overtime.NormalWorkEnd.Hour);
+        Assert.Equal(8, day.Overtime.NormalWorkStart!.Value.Hour);
+        Assert.Equal(17, day.Overtime.NormalWorkEnd!.Value.Hour);
         Assert.Equal(3m, day.Overtime.OvertimeHours);
     }
 
@@ -200,6 +200,8 @@ public sealed class OvertimeQueryTests
         var result = await Query(client, SingleDay + query);
         using var sent = JsonDocument.Parse(Assert.Single(factory.Handler.Bodies));
         Assert.Equal(userId, sent.RootElement.GetProperty("userIds")[0].GetString());
+        using var report = JsonDocument.Parse(factory.Handler.ReportRequests.Last().Body);
+        Assert.Equal(userId, report.RootElement.GetProperty("userid").GetString());
         Assert.Equal(directoryExpected, !factory.Handler.DirectoryRequests.IsEmpty);
         Assert.Equal(directoryExpected ? "李四" : null, Assert.Single(result.Days).UserName);
     }

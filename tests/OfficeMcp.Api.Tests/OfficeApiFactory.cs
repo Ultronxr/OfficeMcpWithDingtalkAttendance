@@ -134,6 +134,9 @@ internal sealed class FakeDingTalkHandler : HttpMessageHandler
     public int VerificationCalls { get; private set; }
     public Func<int, string> VerificationResponse { get; set; } = _ =>
         """{"errcode":0,"result":{"userid":"test-user-000001","attendance_result_list":[]}}""";
+    public ConcurrentQueue<(string Path, string Body)> ReportRequests { get; } = new();
+    public Func<string, string, string>? ReportResponse { get; set; }
+    public Func<string, string, CancellationToken, Task<string>>? ReportResponseAsync { get; set; }
 
     /// <summary>按路径区分令牌和考勤请求；意外地址立即失败。</summary>
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -155,6 +158,16 @@ internal sealed class FakeDingTalkHandler : HttpMessageHandler
         }
         if (request.RequestUri.AbsolutePath == "/topapi/attendance/getupdatedata")
             return Json(VerificationResponse(++VerificationCalls));
+        if (request.RequestUri.AbsolutePath is "/topapi/attendance/getattcolumns" or "/topapi/attendance/getcolumnval")
+        {
+            Assert.Equal(HttpMethod.Post, request.Method);
+            var reportBody = await request.Content!.ReadAsStringAsync(cancellationToken);
+            ReportRequests.Enqueue((request.RequestUri.AbsolutePath, reportBody));
+            if (ReportResponseAsync is not null)
+                return Json(await ReportResponseAsync(request.RequestUri.AbsolutePath, reportBody, cancellationToken));
+            return Json(ReportResponse?.Invoke(request.RequestUri.AbsolutePath, reportBody)
+                ?? DefaultReport(request.RequestUri.AbsolutePath, reportBody));
+        }
         Assert.Equal("/attendance/listRecord", request.RequestUri.AbsolutePath);
         Assert.Equal(HttpMethod.Post, request.Method);
         var count = Interlocked.Increment(ref _attendanceCalls);
@@ -165,6 +178,24 @@ internal sealed class FakeDingTalkHandler : HttpMessageHandler
         if (AttendanceResponseAsync is not null)
             return Json(await AttendanceResponseAsync(body, cancellationToken), ResponseStatus);
         return Json(AttendanceResponse(count), ResponseStatus);
+    }
+
+    /// <summary>默认合成报表将所有日期安排为工作日；非工作日测试显式覆盖，绝不访问真实企业。</summary>
+    public static string DefaultReport(string path, string body)
+    {
+        if (path.EndsWith("getattcolumns", StringComparison.Ordinal))
+            return """{"errcode":0,"result":{"columns":[{"id":91001,"alias":"attendance_rest_days","name":"合成休息列"}]}}""";
+        using var request = System.Text.Json.JsonDocument.Parse(body);
+        var root = request.RootElement;
+        var start = DateOnly.ParseExact(root.GetProperty("from_date").GetString()![..10], "yyyy-MM-dd");
+        var end = DateOnly.ParseExact(root.GetProperty("to_date").GetString()![..10], "yyyy-MM-dd");
+        Assert.InRange(end.DayNumber - start.DayNumber + 1, 1, 31);
+        var values = Enumerable.Range(0, end.DayNumber - start.DayNumber + 1)
+            .Select(index => new { date = start.AddDays(index).ToString("yyyy-MM-dd") + " 00:00:00", value = "0" }).ToArray();
+        return System.Text.Json.JsonSerializer.Serialize(new { errcode = 0, result = new
+        {
+            column_vals = new[] { new { column_vo = new { id = long.Parse(root.GetProperty("column_id_list").GetString()!) }, column_vals = values } }
+        } });
     }
 
     /// <summary>生成 JSON HTTP 响应。</summary>

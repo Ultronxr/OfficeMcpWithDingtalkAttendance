@@ -26,6 +26,9 @@ public sealed record AttendanceResponse(DateOnly WorkDate, string UserId,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] AttendanceError? Error = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? UserName = null);
 
+/// <summary>考勤模块内部的员工选择结果；防止报表查询重复解析姓名或误用脱敏 ID。</summary>
+internal sealed record ResolvedAttendanceQuery(string UserId, AttendanceResponse[] Days);
+
 /// <summary>单个工作日的失败信息，不包含令牌、上游原始响应或完整用户 ID。</summary>
 /// <param name="Code">稳定的错误码。</param>
 /// <param name="Message">可直接展示的错误说明。</param>

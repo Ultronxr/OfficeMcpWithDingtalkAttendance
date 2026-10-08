@@ -54,6 +54,8 @@ flowchart LR
 
 参数和员工解析成功后，考勤查询以 HTTP 200 返回结果数组，调用者必须逐日检查 `success`。分段的钉钉业务、网络、格式错误和超时都放入该段日期的 `error`，不转发上游原始错误正文；员工目录失败以 502/504 ProblemDetails 返回，姓名不存在或重名以 404/409 返回。内部编程错误仍走统一 500 ProblemDetails。客户端日志禁用 URL 记录，业务结果也不写日志。
 
+加班查询复用考勤模块内部已解析员工选择结果，公开考勤接口保持原契约；`OvertimeClassificationService` 通过原生报表的稳定 alias 动态获取休息安排，有记录的休息日／节假日和未知分类日期均流出。分类查询与考勤共享时间预算；缺卡、未知类型和时长无法计算通过独立异常与完整性字段表达。规则及汇总详见 [非工作日加班补齐](overtime-non-workday-prd.md)。
+
 ## 参考依据
 
 - [钉钉获取用户考勤数据](https://open.dingtalk.com/document/orgapp/obtain-the-attendance-update-data)

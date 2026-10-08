@@ -126,9 +126,11 @@ ConvertTo-Json -InputObject $officeResult -Depth 6
 
 ## 加班日期与时长查询
 
-`GET /api/attendance/overtime` 对应只读 MCP 工具 `attendance_overtime`。入参与 `attendance_query` 相同：`start_date`、`end_date` 必填，`user_id`／`user_name` 二选一或均省略，`detail` 为 `simple`／`full`。内部直接复用原考勤查询的一次调用，保留七天分段、姓名消歧、日期上限、超时和原明细，不另查排班或审批接口。
+`GET /api/attendance/overtime` 对应只读 MCP 工具 `attendance_overtime`。入参与 `attendance_query` 相同：`start_date`、`end_date` 必填，`user_id`／`user_name` 二选一或均省略，`detail` 为 `simple`／`full`。复用一次原考勤查询，保留七天分段、姓名消歧、日期上限和原明细；另通过钉钉原生 `getattcolumns` 动态发现休息天数列，再用 `getcolumnval` 查询日期安排，报表最多 31 天一段，与考勤共用单次查询时间预算。
 
-原考勤工具返回所有日期，并展示钉钉返回的计划时间；加班工具按服务端 `Overtime` 配置筛选，`days` 只返回加班日，每个加班日保留当天全部 `records`，再添加 `overtime`。同一工作日有多个下班记录时取最晚实际下班时间，只计一次；没有实际 `OffDuty` 时间就排除，不要求同时存在上班卡。
+原考勤工具返回所有日期；加班工具的 `days` 返回符合规则的加班日和分类未知的待核验出勤，保留每天全部 `records`。`day_type` 为 `workday`、`non_workday` 或 `unknown`，`classification` 说明钉钉原生休息安排，`overtime_confirmed` 表示是否按本工具规则确认，`anomalies` 明示缺卡、未知类型和时间逆序。
+
+工作日仍取最晚实际 `OffDuty` 应用配置门槛；非工作日（包括该员工安排休息的节假日）有任意记录即返回，不要求 21:00 或上下班卡齐全。完整卡从最早 `OnDuty` 至最晚 `OffDuty` 计时；缺卡及无法核算时长返回 null，不能用零或排除日期代替。分类失败也保留记录，`day_type=unknown`、`overtime_confirmed=null`，不计入已确认汇总。没有实际时间的原始记录同样保留异常，但不称为已确认出勤。普通休息与法定节假日不能仅凭休息标记细分，原生加班列为零也不代表没有实际出勤。完整目标见 [非工作日加班补齐](docs/overtime-non-workday-prd.md)。
 
 默认配置：
 
@@ -142,7 +144,7 @@ ConvertTo-Json -InputObject $officeResult -Depth 6
 
 这三个时间可以在 `appsettings.Local.json` 中覆盖，或使用 `Overtime__WorkStartTime`、`Overtime__WorkEndTime`、`Overtime__ThresholdTime` 环境变量；修改后重启生效。必须满足同一日内上班 < 下班 <= 门槛。上班时间只用于展示规则，不改变原迟到／早退状态或手机定时。
 
-**实际下班时间达到 21:00:00 即计加班，达到门槛后从 18:00 开始计时。** 20:59:59 不计，21:00 计 3 小时，21:30 计 3.5 小时。跨午夜仍按原 `work_date` 归属，例如次日 00:30 的下班卡归属前一天，计 6.5 小时。不扣餐休或按整点取整；秒数保留时间差精度，小时数四舍五入到两位，合计小时从总秒数换算，不累加逐日舍入值。
+**工作日实际下班时间达到 21:00:00 即计加班，达到门槛后从 18:00 开始计时。** 20:59:59 不计，21:00 计 3 小时，21:30 计 3.5 小时。非工作日不应用这些时刻，`normal_work_start`、`normal_work_end`、`threshold_at` 为 null；其 `duration_basis=first_on_to_last_off`，09:00 至 18:00 的完整卡计 9 小时。跨午夜均按原 `work_date` 归属。不扣餐休或按整点取整；秒数保留时间差精度，小时数四舍五入到两位，合计小时从已知总秒数换算，不累加逐日舍入值，也不代表钉钉审批认定的时长。
 
 返回结构示例（合成数据）：
 
@@ -155,7 +157,10 @@ ConvertTo-Json -InputObject $officeResult -Depth 6
     "work_end_time": "18:00:00+08:00",
     "threshold_time": "21:00:00+08:00",
     "threshold_inclusive": true,
-    "duration_basis": "work_end"
+    "duration_basis": "work_end",
+    "non_workday_inclusion": "any_record",
+    "non_workday_duration_basis": "first_on_to_last_off",
+    "unknown_classification_policy": "return_for_review"
   },
   "days": [
     {
@@ -177,22 +182,35 @@ ConvertTo-Json -InputObject $officeResult -Depth 6
         "threshold_at": "2026-09-10T21:00:00+08:00",
         "last_off_duty_at": "2026-09-10T21:30:00+08:00",
         "overtime_seconds": 12600,
-        "overtime_hours": 3.5
+        "overtime_hours": 3.5,
+        "first_on_duty_at": null,
+        "duration_basis": "work_end",
+        "duration_status": "calculated"
       },
+      "day_type": "workday",
+      "overtime_confirmed": true,
+      "inclusion_reason": "workday_threshold",
+      "classification": { "status": "confirmed", "source": "dingtalk_report", "is_non_workday": false },
+      "anomalies": [{ "code": "missing_on_duty", "message": "缺少有效上班打卡，已保留全部记录。" }],
       "success": true
     }
   ],
   "summary": {
     "overtime_days": 1,
     "total_overtime_seconds": 12600,
-    "total_overtime_hours": 3.5
+    "total_overtime_hours": 3.5,
+    "returned_days": 1,
+    "unconfirmed_days": 0,
+    "duration_unconfirmed_days": 0,
+    "anomalous_days": 1,
+    "duration_complete": true
   },
   "complete": true,
   "errors": []
 }
 ```
 
-当 `complete=true` 且 `days=[]` 时，表示请求范围内没有满足当前规则的日期，汇总为零。部分或全部分段查询失败时 `complete=false`，`errors` 按工作日列出原 `code`、`message` 和可用的 `provider_code`；成功日期中的加班结果仍保留，汇总只覆盖这些成功日期，不能当作完整统计。缺下班卡的成功日期直接排除，不列入错误。HTTP 鉴权、参数和姓名解析错误沿用原考勤接口。
+当 `complete=true` 且 `days=[]` 时，表示范围内没有满足规则或待核验的出勤日期。考勤／所需分类查询失败时 `complete=false`，`errors` 逐日说明安全错误；分类未知仍返回已有记录。`summary.overtime_days` 包括确有非工作日打卡的缺卡日期，`returned_days` 包括待核验候选；`unconfirmed_days` 和 `duration_unconfirmed_days` 分别说明未确认加班与已确认但缺时长的天数。总时长仅合计已确认且能核算的部分，必须同时检查 `duration_complete`。缺卡可以使时长不完整而查询仍完整，不能将 `complete=true` 等同于时长齐全。HTTP 鉴权、参数和姓名解析错误沿用原考勤接口。
 
 ## 发布与 NSSM
 

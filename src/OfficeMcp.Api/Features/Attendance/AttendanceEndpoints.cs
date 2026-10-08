@@ -25,6 +25,7 @@ public static class AttendanceEndpoints
                 "Overtime 时间必须满足同一天内 WorkStartTime < WorkEndTime <= ThresholdTime。")
             .ValidateOnStart();
         services.AddScoped<OvertimeService>();
+        services.AddScoped<OvertimeClassificationService>();
         services.AddSwaggerGen(options => options.OperationFilter<AttendanceDateOperationFilter>());
         return services;
     }
@@ -41,7 +42,7 @@ public static class AttendanceEndpoints
         group.MapGet("/attendance/overtime", QueryOvertimeAsync)
             .WithName("attendance_overtime").WithTags("Attendance")
             .WithSummary("查询日期范围内的加班日考勤与加班统计")
-            .WithDescription("复用考勤查询的日期、员工及 detail 参数。按服务端固定作息配置判断，不使用钉钉计划时间；有实际 OffDuty 下班卡才参与，每个工作日取最晚一次，达到门槛（含）即计加班，时长从配置的正常下班时间开始。跨午夜按原 work_date 归属。days 仅含加班日并保留当天全部打卡记录；summary 汇总成功日期，complete=false 时必须同时查看 errors，不得把查询失败当成未加班。")
+            .WithDescription("复用考勤查询参数与全部记录，并读取钉钉原生休息安排。工作日最晚 OffDuty 达到配置门槛（含）后，从配置正常下班时间计时。非工作日包括安排休息的节假日，有任意记录即返回，缺卡及未知类型标为 anomalies，不隐藏；完整卡从最早 OnDuty 至最晚 OffDuty 计时，不扣餐休。分类失败有记录也返回，day_type=unknown、overtime_confirmed=null，不计入已确认汇总；不可计算时长为 null。不能把钉钉加班列为零解释成没有加班。summary 区分返回、已确认、异常及未知时长天数；duration_complete=false 时总时长只覆盖可核算部分，complete=false 必须查看 errors。跨午夜按原 work_date 归属，full 明细和全部时间遵守统一北京时间规范。")
             .ProducesProblem(400).ProducesProblem(401).ProducesProblem(404).ProducesProblem(409)
             .ProducesProblem(500).ProducesProblem(502).ProducesProblem(504);
         return group;
@@ -106,7 +107,7 @@ public sealed class AttendanceDateOperationFilter(IOptions<AttendanceOptions> op
         operation.Description += $" 单次最多 {options.Value.MaxQueryDays} 天。";
         operation.Description += operation.OperationId == "attendance_query"
             ? "查询失败的日期以 success=false 和 error 表示，成功日期仍返回。"
-            : $"当前配置：{overtime.Value.WorkStartTime:HH:mm:ss} 上班、{overtime.Value.WorkEndTime:HH:mm:ss} 下班、{overtime.Value.ThresholdTime:HH:mm:ss}（含）起计加班；达到门槛后从正常下班时间计时。";
+            : $"工作日当前配置：{overtime.Value.WorkStartTime:HH:mm:ss} 上班、{overtime.Value.WorkEndTime:HH:mm:ss} 下班、{overtime.Value.ThresholdTime:HH:mm:ss}（含）起计加班；达到门槛后从正常下班时间计时，非工作日出勤不受该门槛限制。";
         foreach (var name in new[] { "start_date", "end_date" })
         {
             var parameter = operation.Parameters.Single(x => x.Name == name);
