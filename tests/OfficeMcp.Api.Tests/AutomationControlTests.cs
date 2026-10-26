@@ -24,6 +24,49 @@ public sealed class AutomationControlTests
     private static async Task<AutomationResponse> Read(HttpResponseMessage response) =>
         (await response.Content.ReadFromJsonAsync<AutomationResponse>(Json))!;
 
+    /// <summary>直接检查 HTTP JSON，不让反序列化忽略多余字段而掩盖旧在线标记泄漏。</summary>
+    private static async Task AssertControlFields(HttpResponseMessage response, string syncState)
+    {
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var root = document.RootElement;
+        var expected = new[] { "device_id", "desired_enabled", "revision", "last_disabled_revision", "updated_at",
+            "applied_enabled", "applied_revision", "applied_at", "sync_state", "request_revision", "request_superseded" };
+        Assert.Equal(expected.Order(), root.EnumerateObject().Select(x => x.Name).Order());
+        Assert.Equal(syncState, root.GetProperty("sync_state").GetString());
+    }
+
+    /// <summary>GET 和设置的 200／202 均移除旧字段；心跳过期不抹掉历史确认，也不自动探测设备。</summary>
+    [Fact]
+    public async Task ControlResponsesOnlyDescribeSettingsAndAcknowledgement()
+    {
+        await using var factory = new OfficeApiFactory { EnableDevices = true };
+        using var client = factory.AuthenticatedClient();
+        using var phone = factory.DeviceClient();
+        var id = Guid.NewGuid().ToString("D");
+        using var pending = await Set(client, false, id);
+        Assert.Equal(HttpStatusCode.Accepted, pending.StatusCode);
+        await AssertControlFields(pending, "pending");
+        await phone.PostAsJsonAsync(Sync, new AutomationSyncRequest(1, false), Json);
+        var confirmed = await client.GetFromJsonAsync<AutomationResponse>(Endpoint, Json);
+        factory.Clock.Advance(TimeSpan.FromSeconds(61));
+        Assert.False(await factory.Services.GetRequiredService<DeviceCommandStore>().IsOnlineAsync("office-phone", default));
+        using var status = await client.GetAsync(Endpoint);
+        Assert.Equal(HttpStatusCode.OK, status.StatusCode);
+        await AssertControlFields(status, "applied");
+        Assert.Equal(confirmed, await Read(status));
+        using var repeated = await Set(client, false, id);
+        Assert.Equal(HttpStatusCode.OK, repeated.StatusCode);
+        await AssertControlFields(repeated, "applied");
+        var result = await Read(repeated);
+        Assert.Equal(1, result.Revision);
+        Assert.Equal(1, result.RequestRevision);
+        Assert.False(result.RequestSuperseded);
+        Assert.Equal(confirmed!.AppliedAt, result.AppliedAt);
+        Assert.Null(factory.Services.GetRequiredService<DeviceProbeService>().Take("office-phone"));
+        Assert.Empty(Directory.EnumerateFiles(factory.DeviceStateDirectory, "*.json"));
+        Assert.Equal(0, factory.Handler.TokenCalls);
+    }
+
     /// <summary>手机初始未确认；关闭必须等待手机真正上报对应版本，不创建动作或调用钉钉。</summary>
     [Fact]
     public async Task DisableRequiresDeviceAcknowledgementAndNeverCreatesTask()
@@ -53,7 +96,6 @@ public sealed class AutomationControlTests
         Assert.Equal("applied", applied!.SyncState);
         Assert.Equal(false, applied.AppliedEnabled);
         Assert.Equal(factory.Clock.GetUtcNow(), applied.AppliedAt);
-        Assert.True(applied.DeviceOnline);
         Assert.Equal(0, factory.Handler.TokenCalls);
         Assert.Equal(0, factory.Handler.VerificationCalls);
         Assert.Equal(HttpStatusCode.NoContent, (await phone.PostAsJsonAsync("/api/devices/office-phone/commands/lease", new { wait_seconds = 0 })).StatusCode);
@@ -216,6 +258,8 @@ public sealed class AutomationControlTests
         var remote = await client.PostAsJsonAsync("/api/attendance/clock-in", new {
             request_id = Guid.NewGuid().ToString("D"), check_type = "OnDuty", wait_seconds = 0 });
         Assert.Equal(HttpStatusCode.Accepted, remote.StatusCode);
+        using var remoteJson = JsonDocument.Parse(await remote.Content.ReadAsStringAsync());
+        Assert.True(remoteJson.RootElement.TryGetProperty("device_online", out _));
         var now = factory.Clock.GetUtcNow();
         var local = await phone.PostAsJsonAsync("/api/devices/office-phone/attendance/executions",
             new ScheduledClockInReport(Guid.NewGuid().ToString("N"), now.ToOffset(TimeSpan.FromHours(8)).ToString("yyyy-MM-dd"),
@@ -273,6 +317,14 @@ public sealed class AutomationControlTests
         var root = document.RootElement;
         var paths = root.GetProperty("paths");
         var route = paths.GetProperty(Endpoint);
+        var response = root.GetProperty("components").GetProperty("schemas").GetProperty("AutomationResponse").GetProperty("properties");
+        Assert.False(response.TryGetProperty("device_online", out _));
+        Assert.Contains("attendance_device_status", response.GetProperty("sync_state").GetProperty("description").GetString());
+        foreach (var method in new[] { "get", "post" })
+            Assert.Contains("attendance_device_status", route.GetProperty(method).GetProperty("description").GetString());
+        // 同名字段只从自动开关响应移除，打卡 Task 契约保持原样。
+        Assert.True(root.GetProperty("components").GetProperty("schemas").GetProperty("ClockInTaskResponse")
+            .GetProperty("properties").TryGetProperty("device_online", out _));
         Assert.Equal("attendance_automation_set", route.GetProperty("post").GetProperty("operationId").GetString());
         Assert.Equal("attendance_automation_status", route.GetProperty("get").GetProperty("operationId").GetString());
         Assert.DoesNotContain(paths.EnumerateObject(), x => x.Name.Contains("/devices/"));

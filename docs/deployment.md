@@ -22,6 +22,20 @@
 
 网关配置参考 [OpenAPI 示例](../deploy/gateway-office.openapi.yaml) 或 [HTTP 示例](../deploy/gateway-office.http.yaml)，二选一合并到已有服务。网关与后端同机时使用回环地址；凭据从网关自己的私密环境中读取。保留已有认证设置，不用示例整体覆盖线上配置。
 
+## 设备实时在线探测升级
+
+更新后端并在网关加入 `attendance_device_status`，刷新 OpenAPI；手机仅需更新 `office_remote_listener.js` 并安全停止旧实例、启动唯一新版接收器。保留配置、定时任务、全部 Task、自动开关和手机持久化状态。正在执行打卡时先等待完成，不通过手动运行定时入口验收。
+
+新版接收器在领取请求声明 `supports_probe=true`，纯通信挑战通过同一链路下发，再由独立认证路由回传。后端保留旧手机领取协议，新手机也能接收旧后端命令；但旧接收器不支持挑战时，新探测只能超时，不能把旧心跳在线当作升级完成。
+
+上线后只调用新只读工具确认 `online=true/status=online`，检查北京时间字段及原接口兼容；不触发打卡或切换自动开关。断网、应答丢失及重放由合成设备测试覆盖，不为验收强制断开用户手机网络。回滚后端或接收器不需要迁移数据，因为探测仅存于内存。
+
+## 自动开关响应移除旧在线字段
+
+`attendance_automation_status` 和 `attendance_automation_set` 不再返回 `device_online`，调用方需停止依赖这个字段；实时在线改用 `attendance_device_status`。`sync_state` 与 `applied_*` 保留最后一次版本确认的含义，不表示设备此刻在线。
+
+部署本次响应调整只需更新后端、刷新网关 OpenAPI／工具说明。已支持实时探测的手机无需更新或重启；不迁移开关状态、不修改版本、定时计划或历史 Task。上线验收读取状态 JSON 和 OpenAPI，确认两种开关响应模型均无旧字段，专用探测仍可用；不得通过真实开关设置或打卡来验收字段删除。
+
 ## 非工作日加班查询升级
 
 本次更新后端并刷新网关 OpenAPI／工具说明，工具名及五个参数保持不变。部署前确认原生 `getattcolumns` 和 `getcolumnval` 在当前应用下可读；部署后只读验证历史工作日、休息日白天完整卡及缺卡日期。确认 `day_type`、`anomalies`、nullable 时长和 `summary.duration_complete` 已在工具定义与真实响应中生效。仅检查 healthz 不足以确认该功能可用。保留配置、自动开关和所有 Task 数据，手机脚本不参与此次查询能力升级。

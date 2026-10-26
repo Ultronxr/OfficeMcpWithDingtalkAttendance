@@ -36,6 +36,10 @@ X-Api-Key: {{officeApiKey}}
 GET {{baseUrl}}/api/attendance/overtime?start_date=2026-09-01&end_date=2026-09-14&user_id=test-user-000001&detail=full
 X-Api-Key: {{officeApiKey}}
 
+### 只读实时往返探测手机：默认等待10秒，允许1至30秒，不触发打卡或修改开关
+GET {{baseUrl}}/api/attendance/device-status?wait_seconds=10
+X-Api-Key: {{officeApiKey}}
+
 ### 查询被动自动打卡开关（请假前后先确认手机生效状态）
 GET {{baseUrl}}/api/attendance/automation
 X-Api-Key: {{officeApiKey}}

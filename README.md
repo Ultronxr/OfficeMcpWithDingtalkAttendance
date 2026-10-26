@@ -10,6 +10,23 @@ AutoJs6 远程打卡与上午本地定时打卡共用持久化 Task 和钉钉 AP
 
 所有工具共用 [全项目时间规范](docs/time-conventions.md)：完整时间统一为 `yyyy-MM-ddTHH:mm:ss+08:00`，包括 full 明细；不返回 `time_zone`。纯日期仍为 `yyyy-MM-dd`，每日作息时刻带 `+08:00`，时长保持数字。
 
+## 实时查询打卡设备在线状态
+
+远程打卡前需要确认手机通信是否可用时，调用只读工具 `attendance_device_status`，或：
+
+```http
+GET /api/attendance/device-status?wait_seconds=10
+X-Api-Key: <本服务的 API Key>
+```
+
+`wait_seconds` 可省略，默认 10 秒，范围 1～30；收到手机对本次独立挑战的应答即提前返回。接口不亮屏、不打开钉钉、不创建打卡 Task、不改自动开关。
+
+- `online=true`、`status=online`：本次往返成功，设备在 `checked_at` 时通信可用。
+- `online=false`、`status=probe_timeout`：期限内没有收到本次应答，不能确认可用。ZeroTier／VPN 断开、接收器未运行或未升级，以及正在执行动作／重试回执，都可能导致超时；结果不区分故障原因。
+- `device_id` 为已配置的打卡手机；`started_at`、`checked_at` 为秒级北京时间；`elapsed_ms` 包含等待领取的时间，不是网络 RTT。成功不保证稍后的连接或打卡结果。
+
+`attendance_automation_status`、`attendance_automation_set` 不再返回 `device_online`：它们只描述开关和同步确认，`sync_state=applied` 表示手机已确认当前版本，`applied_at` 是确认时间，均不证明此刻在线。实时通信请调用 `attendance_device_status`。打卡 Task 的同名字段暂不调整，仍表示最近 60 秒内连接过。移除此字段需更新后端并刷新网关定义，已经升级的手机无需再更新；详见 [部署说明](docs/deployment.md#自动开关响应移除旧在线字段)。
+
 ## 部署方式
 
 - Linux 示例服务目录为 `/opt/office-mcp`，服务名为 `office-mcp.service`，按实际环境调整。

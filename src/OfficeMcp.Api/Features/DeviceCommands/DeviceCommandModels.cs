@@ -53,8 +53,8 @@ public sealed record DeviceCommandJob
     [JsonIgnore] public bool RequiresDeviceAction => Source == RemoteCommand;
 }
 
-/// <summary>设备领取参数，长轮询最长等待 25 秒。</summary>
-public sealed record DeviceLeaseRequest(int WaitSeconds = 25);
+/// <summary>设备领取参数，长轮询最长等待 25 秒；只有显式 SupportsProbe 的客户端能收到纯通信挑战。</summary>
+public sealed record DeviceLeaseRequest(int WaitSeconds = 25, bool SupportsProbe = false);
 
 /// <summary>手机收到的固定动作；到期时间使用 UTC 毫秒，避免时区歧义。</summary>
 public sealed record DeviceLease(string TaskId, string Action, string LeaseToken,

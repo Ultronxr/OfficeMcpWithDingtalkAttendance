@@ -47,10 +47,11 @@ MCP 接口由网关提供，手机通过 HTTP 主动领取命令，不需要开�
 |---|---|
 | `desired_enabled`、`revision` | 服务端已保存的期望开关和版本 |
 | `applied_enabled`、`applied_revision`、`applied_at` | 手机最后确认已保存的状态、版本及服务端收到确认的时间，未确认时为 null |
-| `sync_state=applied` | 手机已确认当前服务端版本，可以说明当前设置已在手机应用 |
+| `sync_state=applied` | 手机已确认当前服务端版本；表示版本确认，不证明此刻在线 |
 | `sync_state=pending`／HTTP 202 | 仍待同步；用只读 `attendance_automation_status` 查询，不需要重新设置 |
 | `request_revision`、`request_superseded` | 本次请求对应版本，以及它是否已被后续设置覆盖；旧请求重传不会撤销新设置 |
-| `device_online` | 最近 60 秒是否连接服务端；在线与已应用开关是不同状态 |
+
+两个自动开关工具不再返回 `device_online`。需要实时判断设备通信时，单独调用 `attendance_device_status`；`applied_at` 是最后一次有效版本确认时间，不是心跳时间。
 
 关闭会禁止后续随机规划，并取消固定入口 `autojs6_autowake.js` 已登记但尚未执行的子任务。AutoJs6 的周期主任务继续保留，到点只记录 `AUTOMATION_DISABLED` 并退出。开启仅保存开关，等下一次原定主任务触发时恢复；不立即亮屏、不重新随机、不补建当天计划。原有日期、星期、随机窗口及 `CONFIG.enabled` 上层开关保持不变。手动 `direct` 和 MCP 主动打卡不受远程开关影响，已开始动作和后续核验仍会完成。
 
@@ -162,6 +163,14 @@ VERIFY_RESULT：task_id=<Task UUID>，state=succeeded，attendance_confirmed=tru
 5. **服务端核验。** `office-mcp` 对照执行前考勤基线读取钉钉官方 API。手机的 `launch_requested` 只是启动请求回执；只有服务端 `attendance_confirmed: true` 才表示已确认考勤记录。上班已有有效记录时不下发动作，下班已有记录时必须确认实际时间更新；超时未确认不能直接断言未打卡。
 
 Agent 通过 `attendance_clock_in` 创建远程任务，同一操作重试复用 `request_id`。返回待处理的 `task_id` 后，用 `attendance_clock_in_status` 查询同一任务；该状态接口同时支持本地核验 Task。`attendance_query` 用于直接查询考勤。已领取命令不会因回执丢失而自动重发，过期命令也不补执行。
+
+## 只读在线探测
+
+`attendance_device_status` 对实际打卡通道执行一次往返探测。新版接收器在原领取请求增加 `supports_probe=true`；后端只向声明支持的客户端返回 `type=connectivity_probe` 和一次性 `probe_id`。手机向 `POST /api/devices/{device_id}/probes/{probe_id}/ack` 原样回传标识，使用原服务地址与设备凭据。
+
+这条分支不进入 `execute()`，不保存 `done_*` 或 `pending_receipt`，不亮屏、不启动应用、不改开关和计划。标识格式错误直接拒绝；应答失败或已过期不保存、不重放，下一轮继续原领取／重连流程。原打卡命令优先，不为探测中断业务动作；接收器忙碌也可能使查询在默认 10 秒内超时，调用者可将 `wait_seconds` 增至最多 30 秒。
+
+本次只需更新并重启常驻接收器，不修改其他手机模块。旧接收器仍可正常打卡，但不回应新探测；新版接收器对旧后端的原命令保持兼容。必须同时升级后端并刷新网关才能使用新工具，不能以打卡 Task 最近 60 秒的在线标记代替实时应答。
 
 ## 打卡结束后返回桌面
 

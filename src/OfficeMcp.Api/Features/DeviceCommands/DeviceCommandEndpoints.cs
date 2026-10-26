@@ -29,9 +29,11 @@ public static class DeviceCommandEndpoints
         services.AddAuthorization(options => options.AddPolicy(DeviceAuthenticationHandler.PolicyName, policy =>
             policy.AddAuthenticationSchemes(DeviceAuthenticationHandler.SchemeName).RequireAuthenticatedUser().RequireClaim("device_id")));
         services.AddSingleton<DeviceCommandStore>();
+        services.AddSingleton<DeviceProbeService>();
         services.AddSingleton<ClockInService>();
         services.AddHostedService<ClockInWorker>();
         services.AddSwaggerGen(options => options.SchemaFilter<ClockInSchemaFilter>());
+        services.AddSwaggerGen(options => options.OperationFilter<DeviceStatusOperationFilter>());
         return services;
     }
 
@@ -42,6 +44,8 @@ public static class DeviceCommandEndpoints
             .RequireAuthorization(DeviceAuthenticationHandler.PolicyName);
         group.MapPost("/lease", LeaseAsync).ExcludeFromDescription();
         group.MapPost("/{taskId}/report", ReportAsync).ExcludeFromDescription();
+        endpoints.MapPost("/api/devices/{deviceId}/probes/{probeId}/ack", AcknowledgeProbe)
+            .RequireAuthorization(DeviceAuthenticationHandler.PolicyName).ExcludeFromDescription();
         var attendance = endpoints.MapGroup("/api/devices/{deviceId}/attendance")
             .RequireAuthorization(DeviceAuthenticationHandler.PolicyName);
         attendance.MapPost("/executions", ReportLocalAsync).ExcludeFromDescription();
@@ -80,10 +84,10 @@ public static class DeviceCommandEndpoints
         return TypedResults.Ok(await service.GetDeviceTaskAsync(deviceId, taskId, token));
     }
 
-    /// <summary>长轮询领取一条命令；没有任务返回 204，已领取任务不会重发。</summary>
-    private static async Task<Results<Ok<DeviceLease>, NoContent>> LeaseAsync(string deviceId,
+    /// <summary>长轮询优先领取命令，支持探测时再领取纯通信挑战；均无待办返回 204，已领取任务不会重发。</summary>
+    private static async Task<Results<Ok<DeviceLease>, Ok<DeviceProbeChallenge>, NoContent>> LeaseAsync(string deviceId,
         [FromBody] DeviceLeaseRequest request, HttpContext context, DeviceCommandStore store,
-        TimeProvider clock, CancellationToken token)
+        DeviceProbeService probes, TimeProvider clock, CancellationToken token)
     {
         CheckDevice(context, deviceId);
         if (request.WaitSeconds is < 0 or > 25) throw new ApiRequestException(400, "invalid_wait_seconds", "领取等待时间为 0 至 25 秒。");
@@ -94,10 +98,19 @@ public static class DeviceCommandEndpoints
             var job = await store.LeaseAsync(deviceId, token);
             if (job is not null) return TypedResults.Ok(new DeviceLease(job.Id, job.Action, job.LeaseToken!,
                 clock.GetUtcNow().ToUnixTimeMilliseconds(), job.ExpiresAt.ToUnixTimeMilliseconds(), job.Payload));
+            // 原动作始终优先；只有新版接收器显式声明支持时才发送纯通信挑战。
+            if (request.SupportsProbe && probes.Take(deviceId) is { } probe) return TypedResults.Ok(probe);
             if (elapsed.Elapsed.TotalSeconds >= request.WaitSeconds) break;
             await Task.Delay(500, token);
         } while (true);
         return TypedResults.NoContent();
+    }
+
+    /// <summary>接收纯通信应答；不更新旧心跳、任务或自动开关，迟到应答只返回未接受。</summary>
+    private static IResult AcknowledgeProbe(string deviceId, string probeId, HttpContext context, DeviceProbeService probes)
+    {
+        CheckDevice(context, deviceId);
+        return TypedResults.Ok(new { accepted = probes.Acknowledge(deviceId, probeId) });
     }
 
     /// <summary>保存设备动作回执，幂等回报不会再次操作手机或延长核验期限。</summary>

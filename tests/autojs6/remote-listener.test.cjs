@@ -7,10 +7,12 @@ const test = require('node:test');
 const source = fs.readFileSync(path.resolve(__dirname, '../../autojs6/office_remote_listener.js'), 'utf8');
 
 /** 为无限循环提供有界内存场景，请求完成后模拟脚本停止并检查锁已释放。 */
-function run(queueFailure = false, cooperativeStop = false, controlFailure = false) {
+function run(queueFailure = false, cooperativeStop = false, controlFailure = false, probe = null) {
     const requests = [];
     const events = [];
     const stored = new Map([['pending_receipt', { id: 'c'.repeat(32), receipt: { lease_token: 'd'.repeat(32), outcome: 'uncertain' } }]]);
+    // 探测场景没有历史业务待办，便于证明纯通信不会生成动作或持久化回执。
+    if (probe) stored.clear();
     let released = false;
     let stop = false;
     let pumps = 0;
@@ -43,6 +45,10 @@ function run(queueFailure = false, cooperativeStop = false, controlFailure = fal
                         leases++;
                         response = leases === 1 ? { task_id: 'a'.repeat(32), lease_token: 'b'.repeat(32), action: 'wake_dingtalk',
                             expires_at_unix_ms: now + 60000, server_time_unix_ms: now } : null;
+                        if (probe && leases === 1) response = { type: 'connectivity_probe', probe_id: probe.id };
+                    } else if (request.path.endsWith('/ack')) {
+                        if (probe.fail) return 503;
+                        response = { accepted: !probe.expired };
                     } else if (request.path.endsWith('/report')) response = { accepted: true };
                     else response = { task_id: 'e'.repeat(32), is_terminal: false };
                     return response === null ? 204 : 200;
@@ -100,6 +106,7 @@ function run(queueFailure = false, cooperativeStop = false, controlFailure = fal
             return { pump(request, deviceId) {
                 assert.equal(deviceId, 'office-phone');
                 pumps++;
+                if (probe) return false;
                 if (queueFailure) throw new Error('模拟队列读取故障');
                 request(pumps === 1 ? 'POST' : 'GET', pumps === 1 ? '/api/devices/office-phone/attendance/executions'
                     : '/api/devices/office-phone/attendance/tasks/' + 'e'.repeat(32), pumps === 1 ? { local_run_id: 'f'.repeat(32) } : null);
@@ -125,6 +132,49 @@ test('旧远程回执优先，本地短请求和最终 GET 查询共存且不重
     }
     assert.deepEqual(result.requests.filter(request => request.path.endsWith('/lease')).map(request => request.body.wait_seconds), [5, 5]);
     assert.equal(result.stored.get('pending_receipt'), undefined);
+    assert.equal(result.released, true);
+});
+
+test('在线探测显式声明能力，只原样应答，不执行动作或保存业务回执', () => {
+    const id = '1'.repeat(32);
+    const result = run(false, false, false, { id });
+    const leases = result.requests.filter(request => request.path.endsWith('/lease'));
+    assert.ok(leases.every(request => request.body.supports_probe === true));
+    const acknowledgements = result.requests.filter(request => request.path.includes('/probes/'));
+    assert.equal(acknowledgements.length, 1);
+    assert.equal(acknowledgements[0].path, '/api/devices/office-phone/probes/' + id + '/ack');
+    assert.equal(acknowledgements[0].method, 'POST');
+    assert.deepEqual(acknowledgements[0].body, {});
+    assert.equal(acknowledgements[0].connectTimeout, 3000);
+    assert.equal(acknowledgements[0].readTimeout, 5000);
+    assert.equal(result.actions, 0);
+    assert.equal(result.stored.size, 0);
+    assert.equal(result.released, true);
+    assert.equal(result.cleanupInterrupted, true);
+});
+
+test('探测标识无效时不发送应答，也不误入打卡动作', () => {
+    const result = run(false, false, false, { id: '../invalid' });
+    assert.equal(result.requests.filter(request => request.path.includes('/probes/')).length, 0);
+    assert.equal(result.actions, 0);
+    assert.equal(result.stored.size, 0);
+    assert.equal(result.released, true);
+});
+
+test('应答网络失败不持久化或重放挑战，仍按原循环继续领取', () => {
+    const result = run(false, false, false, { id: '2'.repeat(32), fail: true });
+    assert.equal(result.requests.filter(request => request.path.endsWith('/ack')).length, 1);
+    assert.equal(result.requests.filter(request => request.path.endsWith('/lease')).length, 2);
+    assert.equal(result.actions, 0);
+    assert.equal(result.stored.size, 0);
+    assert.equal(result.released, true);
+});
+
+test('服务端不接受过期挑战时直接丢弃，不建立回执重试待办', () => {
+    const result = run(false, false, false, { id: '3'.repeat(32), expired: true });
+    assert.equal(result.requests.filter(request => request.path.endsWith('/ack')).length, 1);
+    assert.equal(result.actions, 0);
+    assert.equal(result.stored.size, 0);
     assert.equal(result.released, true);
 });
 

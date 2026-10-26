@@ -79,6 +79,19 @@
     /** 本地事实和结果使用短请求；一次失败不阻塞远程领取循环。 */
     function attendanceRequest(method, path, body) { return request(method, path, body, true); }
 
+    /**
+     * 对本次在线挑战做纯通信应答，不进入打卡执行或持久化回执路径。
+     * @param {Object|null} message 领取接口返回的命令或探测挑战。
+     * @returns {boolean} 是否已识别为探测；网络失败交由原接收循环处理，不保存或重放旧挑战。
+     */
+    function acknowledgeProbe(message) {
+        if (message == null || message.type !== "connectivity_probe") return false;
+        if (!/^[a-f0-9]{32}$/.test(String(message.probe_id))) throw new Error("在线探测协议无效");
+        // 标识只来自经过认证的领取响应，使用原服务地址和设备凭据原样回传。
+        attendanceRequest("POST", "/api/devices/" + config.device_id + "/probes/" + message.probe_id + "/ack", {});
+        return true;
+    }
+
     /** 上报持久化回执；失败保留待发送记录，之后只重传回执，不再执行动作。 */
     function sendReceipt(entry) {
         try {
@@ -214,7 +227,7 @@
                     try { localPending = attendanceQueue.pump(attendanceRequest, config.device_id); }
                     catch (error) { report("本地核验队列暂不可读，远程接收继续运行。"); }
                 }
-                var command = post("/api/devices/" + config.device_id + "/commands/lease", { wait_seconds: localPending || cleanupPending ? 5 : 25 });
+                var command = post("/api/devices/" + config.device_id + "/commands/lease", { wait_seconds: localPending || cleanupPending ? 5 : 25, supports_probe: true });
                 // 仅首次连接和失败后恢复时记录成功，正常的连续长轮询不刷屏。
                 if (!hasConnected) {
                     report("连接成功，正在等待远程命令。");
@@ -223,7 +236,7 @@
                     report("连接已恢复，正在等待远程命令。");
                 }
                 failures = 0;
-                if (command != null) execute(command);
+                if (command != null && !acknowledgeProbe(command)) execute(command);
             } catch (error) {
                 if (stopRequested()) break;
                 failures++;

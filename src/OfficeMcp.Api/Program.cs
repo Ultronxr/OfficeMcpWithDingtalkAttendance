@@ -41,7 +41,7 @@ public partial class Program
         });
         app.MapHealthChecks("/healthz").AllowAnonymous();
         app.MapOfficeOpenApi();
-        app.MapGroup("/api").RequireAuthorization().MapAttendanceEndpoints().MapClockInEndpoints().MapAutomationEndpoints().MapEmployeeEndpoints();
+        app.MapGroup("/api").RequireAuthorization().MapAttendanceEndpoints().MapClockInEndpoints().MapAutomationEndpoints().MapDeviceStatusEndpoints().MapEmployeeEndpoints();
         app.MapDeviceCommands();
         app.Run();
     }

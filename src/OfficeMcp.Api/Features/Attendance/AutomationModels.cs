@@ -9,10 +9,10 @@ public sealed record AutomationSyncRequest(long? AppliedRevision, bool? AppliedE
 /// <summary>下发给固定设备的期望策略，最近关闭版本用于离线后取消旧计划。</summary>
 public sealed record AutomationPolicy(string DeviceId, long Revision, bool Enabled, long LastDisabledRevision);
 
-/// <summary>开关状态和手机确认分别呈现；applied 表示手机已应用当前版本，不代表完成打卡。</summary>
+/// <summary>开关状态和手机最后确认分别呈现；applied 表示已确认当前版本，不代表此刻在线或完成打卡。</summary>
 public sealed record AutomationResponse(string DeviceId, bool DesiredEnabled, long Revision,
     long LastDisabledRevision, DateTimeOffset UpdatedAt, bool? AppliedEnabled, long? AppliedRevision,
-    DateTimeOffset? AppliedAt, string SyncState, bool DeviceOnline, long? RequestRevision = null,
+    DateTimeOffset? AppliedAt, string SyncState, long? RequestRevision = null,
     bool RequestSuperseded = false);
 
 /// <summary>请求去重记录永久保存；旧请求重传只查原版本，不覆盖后续操作。</summary>

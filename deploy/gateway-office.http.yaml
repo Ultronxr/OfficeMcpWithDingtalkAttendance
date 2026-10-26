@@ -3,7 +3,7 @@
 services:
   - name: office_common_tools
     title: 办公服务 · 考勤
-    instructions: 所有完整时间统一为 yyyy-MM-ddTHH:mm:ss+08:00，full明细的已知时间同样可读；不返回time_zone，纯日期保持yyyy-MM-dd，时长仍为数字。local_execution返回executed_at等可读字段。 此连接提供员工列表、动态员工考勤查询、加班统计、主动打卡和任务状态查询。attendance_query 返回全部日期考勤。attendance_overtime 工作日按配置门槛，非工作日（含安排休息的节假日）有任意记录就返回全部打卡，缺卡不隐藏；day_type=unknown、overtime_confirmed=null 表示待核验，不计入已确认加班。anomalies 标明异常，时长无法核算返回null。必须检查summary.duration_complete，false时总时长仅覆盖可核算部分；complete=false时查看errors，不能把失败或钉钉加班列为零解释成没有加班。可先用 employee_list 获取员工ID；姓名重名时根据候选ID选择，勿猜选。主动打卡仍使用配置的固定员工。仅在用户明确要求打卡时调用 attendance_clock_in；未完成时用 attendance_clock_in_status 查询同一任务，只有 attendance_confirmed=true 才确认有记录。attendance_automation_set 用于明确开关被动自动打卡；开启不补打，关闭不影响主动打卡。手机断网沿用旧开关，只有 sync_state=applied 才可说明当前 desired_enabled 已在手机生效；pending 用 attendance_automation_status 查询，request_superseded=true 表示原请求已被后续设置覆盖。
+    instructions: 实时查询打卡设备是否在线请用attendance_device_status，只有本次挑战得到手机应答才返回online=true；probe_timeout表示本次未证实可用，不能确定断网原因。两个自动开关工具不返回device_online；sync_state和applied_*只说明版本确认，不证明此刻在线。Task的device_online仍为最近60秒连接标记。 所有完整时间统一为 yyyy-MM-ddTHH:mm:ss+08:00，full明细的已知时间同样可读；不返回time_zone，纯日期保持yyyy-MM-dd，时长仍为数字。local_execution返回executed_at等可读字段。 此连接提供员工列表、动态员工考勤查询、加班统计、主动打卡和任务状态查询。attendance_query 返回全部日期考勤。attendance_overtime 工作日按配置门槛，非工作日（含安排休息的节假日）有任意记录就返回全部打卡，缺卡不隐藏；day_type=unknown、overtime_confirmed=null 表示待核验，不计入已确认加班。anomalies 标明异常，时长无法核算返回null。必须检查summary.duration_complete，false时总时长仅覆盖可核算部分；complete=false时查看errors，不能把失败或钉钉加班列为零解释成没有加班。可先用 employee_list 获取员工ID；姓名重名时根据候选ID选择，勿猜选。主动打卡仍使用配置的固定员工。仅在用户明确要求打卡时调用 attendance_clock_in；未完成时用 attendance_clock_in_status 查询同一任务，只有 attendance_confirmed=true 才确认有记录。attendance_automation_set 用于明确开关被动自动打卡；开启不补打，关闭不影响主动打卡。手机断网沿用旧开关，只有 sync_state=applied 才可说明当前 desired_enabled 已在手机生效；pending 用 attendance_automation_status 查询，request_superseded=true 表示原请求已被后续设置覆盖。
     type: http
     base_url: http://127.0.0.1:18101
     headers:
@@ -138,7 +138,7 @@ services:
             required: true
             schema: {type: string}
       - name: attendance_automation_set
-        description: 仅在用户明确要求时开关被动自动打卡。enabled=false 禁止主任务规划并取消未执行子任务；true 从下次原定主任务恢复，不立即打卡或补建计划。主动打卡不受影响，已经开始的动作不能撤回。request_id 使用 UUID，重试复用。手机断网沿用上次状态，只有 sync_state=applied 才确认当前设置在手机生效，pending 时用 attendance_automation_status 查询。request_superseded=true 表示该请求已被后续设置覆盖，不能宣称原请求仍生效。
+        description: 仅在用户明确要求时开关被动自动打卡。enabled=false 禁止主任务规划并取消未执行子任务；true 从下次原定主任务恢复，不立即打卡或补建计划。主动打卡不受影响，已经开始的动作不能撤回。request_id 使用 UUID，重试复用。手机断网沿用上次状态，只有 sync_state=applied 才确认当前设置在手机生效，pending 时用 attendance_automation_status 查询。request_superseded=true 表示该请求已被后续设置覆盖，不能宣称原请求仍生效。 本接口不返回device_online，不自动探测设备；sync_state和applied_*表示最后版本确认，实时在线情况单独调用attendance_device_status。
         method: POST
         path: /api/attendance/automation
         read_only: false
@@ -159,7 +159,23 @@ services:
               maximum: 60
               default: 45
       - name: attendance_automation_status
-        description: 只读查询被动自动打卡开关。desired_enabled是服务端设置，applied_enabled和applied_revision是手机最后确认，sync_state=applied才表示手机已确认当前版本。device_online反映最近连接，离线不等于开关已更改。开启不补打，关闭不影响主动打卡。
+        description: 只读查询被动自动打卡开关。desired_enabled是服务端设置，applied_enabled和applied_revision是手机最后确认，sync_state=applied才表示手机已确认当前版本。不返回device_online；sync_state不证明此刻在线，实时通信请调用attendance_device_status。开启不补打，关闭不影响主动打卡。
         method: GET
         path: /api/attendance/automation
         read_only: true
+
+      - name: attendance_device_status
+        description: 只读实时探测打卡设备；每次独立挑战且收到手机应答才返回online=true，不使用旧心跳。online=false/status=probe_timeout表示本次未证实链路可用，可能是网络断开、接收器停止、未升级或忙碌，不能确定故障原因。成功仅证明checked_at时通信可用，不保证稍后打卡成功。elapsed_ms包含等待领取时间，不是网络RTT。不亮屏、不打开应用、不创建任务、不改开关。自动开关接口不返回在线标记，Task的device_online仍表示最近60秒连接。
+        method: GET
+        path: /api/attendance/device-status
+        read_only: true
+        parameters:
+          - name: wait_seconds
+            in: query
+            required: false
+            description: 探测总等待秒数，收到本次应答即提前返回。
+            schema:
+              type: integer
+              minimum: 1
+              maximum: 30
+              default: 10
