@@ -6,7 +6,9 @@
 flowchart LR
     A[外部 AI 客户端] -->|MCP / OAuth| G[mcp-gateway]
     G -->|本机 HTTP / X-Api-Key| H[服务器 OfficeMcp.Api]
-    P[手机 AutoJs6] -->|ZeroTier 长轮询和回执| H
+    P[手机 AutoJs6] -->|HTTPS /office_mcp_device_api/| N[Nginx 设备路由白名单]
+    N -->|内部 HTTP / 独立设备密钥| H
+    P -.兼容旧 ZeroTier 配置.-> H
     H --> C[考勤功能]
     H -.后续添加.-> F[其他办公功能]
     C --> D[共享钉钉客户端与令牌缓存]
@@ -25,6 +27,8 @@ flowchart LR
 - `Infrastructure/Errors`：跨功能共享的 ProblemDetails 错误响应。
 
 日期范围查询实时访问钉钉并缓存 accessToken。远程打卡通过 `BackgroundService` 核验结果，任务保存在 `data/device-commands`，使用原子文件替换和独占锁；无需数据库服务或 MCP SDK。详细流程见 [远程打卡方案](remote-clock-in-design.md)。
+
+手机公网设备入口由 Nginx 按明确白名单映射至原 `/api/devices/...`，设备认证与办公 API／MCP 网关身份独立。手机接收器使用一个 HTTPS 根地址覆盖全部设备通信，不需要电脑或 ADB 桥接，不增加 Task 队列和后台实例。原私网根地址仍保持原协议。方案及边界见 [手机公网 HTTPS](device-public-https-prd.md)。
 
 ## 已确认接口行为
 

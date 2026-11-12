@@ -10,6 +10,92 @@ AutoJs6 远程打卡与上午本地定时打卡共用持久化 Task 和钉钉 AP
 
 所有工具共用 [全项目时间规范](docs/time-conventions.md)：完整时间统一为 `yyyy-MM-ddTHH:mm:ss+08:00`，包括 full 明细；不返回 `time_zone`。纯日期仍为 `yyyy-MM-dd`，每日作息时刻带 `+08:00`，时长保持数字。
 
+## 手机独立通过公网 HTTPS 通信
+
+将手机接收器配置为 `base_url=https://mcp.example.com/office_mcp_device_api`，即可通过普通互联网与云端通信，不需要办公电脑、ADB 或手机 ZeroTier。先按 [公网设备入口部署步骤](docs/deployment.md#手机公网-https-设备入口)配置 Nginx，再更新唯一接收器及本地连接配置。
+
+该路径仅代理设备领取、回执、补报、开关同步、任务结果及探测应答；复用现有 HTTPS 入口，不增加公网端口。手机继续使用独立的 `X-Device-Id`／`X-Device-Key`，不使用 MCP 网关 OAuth、网关密钥或办公 API Key。原无路径私网配置继续兼容，同一接收器只连接一个配置入口。方案与验收见 [手机公网 HTTPS 开发约定](docs/device-public-https-prd.md)。
+
+### 网络请求流向
+
+以下箭头表示请求的发起方向，HTTP 响应沿原路返回。手机主动向设备 API 领取任务、同步配置和回传结果；服务器不需要向手机建立入站连接，手机也不需要监听端口。
+
+```mermaid
+flowchart TB
+    U["你 / Agent"] -->|"打卡、启停、在线查询"| C["Cloudflare"]
+    P["手机 AutoJs6 接收器"] -->|"领取、同步、回执、探测应答"| C
+    C --> N["云端 Nginx"]
+    N -->|"/office_common_tools/mcp"| G["mcp-gateway"]
+    G -->|"内部办公 HTTP API"| S["office-mcp"]
+    N -->|"/office_mcp_device_api/..."| S
+    S -->|"考勤查询与结果核验"| D["钉钉官方 API"]
+```
+
+- Agent 的 MCP 请求经过网关，使用原 OAuth 或该 MCP 端点的 Bearer 凭据；网关再使用办公 API Key 访问 `office-mcp`。
+- 手机的设备 API 请求由 Nginx 直接代理到 `office-mcp`，不经过 MCP 网关，使用手机自己的设备凭据。
+- 公网配置下，领取、回执、开关同步、执行事实补报、任务结果查询及在线探测应答都走同一个 HTTPS 入口。没有同时通过 ZeroTier 领取任务，也没有失败后自动切换到私网的逻辑；保留私网地址兼容能力不代表双通道并行运行。
+
+### 打卡、启停和在线查询如何到达手机
+
+三类操作都由手机发起请求取得数据，但服务端保存的数据及手机处理方式不同：
+
+| 操作 | 服务端处理 | 手机取得数据与确认 |
+|---|---|---|
+| 主动远程打卡 | 创建持久化打卡 Task，记录动作、有效期和核验状态 | 长轮询领取任务 → 亮屏、拉起钉钉 → 回传动作结果 → 服务端调用钉钉官方 API 核验考勤 |
+| 启用／关闭自动打卡 | 保存目标开关与版本号，不创建可领取的打卡动作 | 独立同步请求取得配置 → 手机保存并应用 → 上报已应用版本；`sync_state=applied` 才表示当前设置已在手机生效 |
+| 查询设备是否在线 | 创建有期限的临时内存挑战，不创建持久化打卡 Task | 长轮询收到挑战 → 另发 HTTPS 请求回传挑战 ID → 服务端收到本次匹配应答才返回 `online=true` |
+
+关闭自动打卡不停止接收器，手机仍能收到重新开启的设置和主动打卡命令。在线查询只验证一次通信往返，不亮屏、不打开钉钉，也不把历史心跳当作本次应答。
+
+### HTTP 长轮询如何等待任务
+
+手机到设备 API 这一段采用 **HTTP Long Polling（HTTP 长轮询）**，由普通 HTTPS 请求及服务端的延迟响应逻辑实现，不使用 WebSocket 或 SSE。客户端延长超时还不够，服务端领取接口必须配合等待；本项目的等待逻辑见 [领取接口实现](src/OfficeMcp.Api/Features/DeviceCommands/DeviceCommandEndpoints.cs)。
+
+```mermaid
+sequenceDiagram
+    participant P as 手机接收器
+    participant S as office-mcp
+    participant U as 你 / Agent
+    P->>S: POST 领取请求，wait_seconds=25
+    Note over P,S: 无待办时，服务端暂不发送响应
+    alt 等待期间出现待办
+        U->>S: 经 MCP 发起打卡或在线查询
+        S-->>P: HTTP 200，返回任务或探测挑战
+        P->>S: 回传动作结果或本次探测应答
+    else 等待期满仍无待办
+        S-->>P: HTTP 204，无响应正文
+    end
+    P->>S: 发起下一轮领取请求
+```
+
+1. 请求到达时已有可领取的任务或挑战，直接返回 `200 + JSON`；打卡任务优先于探测挑战。
+2. 无待办时，服务端每 500 毫秒异步检查一次。等待期间出现可领取的数据，就提前返回，本轮请求结束，不必等满 25 秒。
+3. 等待期满仍无待办，返回 `204 No Content`。手机继续接收循环，完成开关同步、待回执重传及必要的结果查询后，再发起领取请求。
+
+25 秒是单次请求的最长等待时间，不是固定的任务采样窗口。有效待领任务即使产生在两轮请求的间隔，也能在下一轮被领取；已过期任务不会因恢复联网重新执行。探测挑战只在本次在线查询期限内有效，开关配置则由独立同步接口取得。
+
+领取接口允许 `wait_seconds=0～25`。接收器通常使用 25 秒，有本地核验或收尾结果待查询时缩短为 5 秒；领取请求的客户端读取超时为 35 秒，Nginx 代理读取超时为 40 秒，为等待和网络传输留出余量。HTTP Keep-Alive 用于复用底层连接，与接口等待多久再返回是不同机制。
+
+下面是一次领取请求的 cURL 示例（Bash），使用示例域名和测试设备。领取成功会占用对应待办，测试时不要与生产手机共用设备身份：
+
+```bash
+curl -i --max-time 35 \
+  -X POST \
+  'https://mcp.example.com/office_mcp_device_api/devices/demo-phone/commands/lease' \
+  -H 'Content-Type: application/json' \
+  -H 'X-Device-Id: demo-phone' \
+  -H 'X-Device-Key: <测试设备密钥>' \
+  --data '{"wait_seconds":25}'
+```
+
+`wait_seconds` 是本服务实现的等待参数；`--max-time 35` 是 curl 对整个请求的超时限制，`-i` 用于显示响应状态和头部。这条命令只完成一轮领取。未声明 `supports_probe` 时不返回在线挑战；实际接收器会发送 `supports_probe=true`，收到挑战后立即调用独立 ACK 接口。
+
+接收器连接失败时按 2、4、8、16、30 秒退避重试，始终重试原配置入口。“连接已恢复”在下一次领取请求成功返回后才打印；日志间隔可能包含退避和长轮询等待，不能据此判断整个间隔都处于断网，也不代表发生了公网／ZeroTier 切换。长轮询机制参考 [RFC 6202](https://www.rfc-editor.org/rfc/rfc6202.html)。
+
+### 关闭 ZeroTier 与断网的影响
+
+使用公网配置时，只要普通 Wi-Fi／移动网络可访问公网服务、AutoJs6 正常运行，关闭手机 ZeroTier 不影响任务通信。本地定时计划读取手机最后已保存的开关状态，不要求每次先联网取得许可；公网断开会影响远程任务领取、开关同步、执行事实回传及结果查询，钉钉实际记录打卡仍需要联网。远程修改开关尚未被手机确认时，手机继续沿用上次已应用的状态。
+
 ## 实时查询打卡设备在线状态
 
 远程打卡前需要确认手机通信是否可用时，调用只读工具 `attendance_device_status`，或：
@@ -22,7 +108,7 @@ X-Api-Key: <本服务的 API Key>
 `wait_seconds` 可省略，默认 10 秒，范围 1～30；收到手机对本次独立挑战的应答即提前返回。接口不亮屏、不打开钉钉、不创建打卡 Task、不改自动开关。
 
 - `online=true`、`status=online`：本次往返成功，设备在 `checked_at` 时通信可用。
-- `online=false`、`status=probe_timeout`：期限内没有收到本次应答，不能确认可用。ZeroTier／VPN 断开、接收器未运行或未升级，以及正在执行动作／重试回执，都可能导致超时；结果不区分故障原因。
+- `online=false`、`status=probe_timeout`：期限内没有收到本次应答，不能确认可用。所选通道网络断开、接收器未运行或未升级，以及正在执行动作／重试回执，都可能导致超时；旧私网配置还可能受 ZeroTier 断开影响，结果不区分故障原因。
 - `device_id` 为已配置的打卡手机；`started_at`、`checked_at` 为秒级北京时间；`elapsed_ms` 包含等待领取的时间，不是网络 RTT。成功不保证稍后的连接或打卡结果。
 
 `attendance_automation_status`、`attendance_automation_set` 不再返回 `device_online`：它们只描述开关和同步确认，`sync_state=applied` 表示手机已确认当前版本，`applied_at` 是确认时间，均不证明此刻在线。实时通信请调用 `attendance_device_status`。打卡 Task 的同名字段暂不调整，仍表示最近 60 秒内连接过。移除此字段需更新后端并刷新网关定义，已经升级的手机无需再更新；详见 [部署说明](docs/deployment.md#自动开关响应移除旧在线字段)。
@@ -31,7 +117,7 @@ X-Api-Key: <本服务的 API Key>
 
 - Linux 示例服务目录为 `/opt/office-mcp`，服务名为 `office-mcp.service`，按实际环境调整。
 - gateway 与后端同机时，通过 `127.0.0.1:18101` 访问后端。
-- 手机通过 ZeroTier 等私有网络访问服务器；文中的 `192.0.2.10`、`mcp.example.com` 均为占位地址，使用前必须替换。
+- 手机推荐通过 `/office_mcp_device_api/` 公网 HTTPS 入口访问设备接口，原 ZeroTier 私网入口保留兼容；文中的 `192.0.2.10`、`mcp.example.com` 均为占位地址，使用前必须替换。
 - 使用 `scripts/publish-linux.ps1` 发布 Linux 自包含程序；升级保留 `appsettings.Local.json` 和 `data/device-commands`。
 - 下方 NSSM 操作适用于选择 Windows 部署的环境。
 

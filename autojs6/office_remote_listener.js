@@ -16,9 +16,41 @@
     var listenerLock = null;
     var config;
     var store;
+    var publicDeviceApi = false;
 
     /** 记录阶段和任务 ID；不记录 URL、请求头、响应原文或凭据。 */
     function report(message) { log(time.line("[Office MCP] " + message)); }
+
+    /**
+     * 校验固定服务入口；公网设备路径只允许 HTTPS，旧无路径地址继续保留原协议。
+     * @param {string} value 手机本地配置的服务根地址。
+     * @returns {string} 去掉末尾斜杠的地址；非法 URI 由外层输出固定错误，不泄漏配置。
+     */
+    function configureEndpoint(value) {
+        var normalized = String(value || "").replace(/\/+$/, "");
+        var uri = new java.net.URI(normalized);
+        var scheme = String(uri.getScheme()).toLowerCase();
+        var path = String(uri.getRawPath() || "");
+        if ((scheme !== "http" && scheme !== "https") || uri.getHost() == null
+            || uri.getRawUserInfo() != null || uri.getRawQuery() != null || uri.getRawFragment() != null
+            || uri.getPort() === 0 || uri.getPort() > 65535
+            || (path !== "" && path !== "/office_mcp_device_api")
+            || (path !== "" && scheme !== "https")) throw new Error("远程连接入口无效");
+        publicDeviceApi = path === "/office_mcp_device_api";
+        return normalized;
+    }
+
+    /**
+     * 将内部设备路径统一映射到所选入口，覆盖回执、开关、补报、收尾和探测。
+     * @param {string} path 当前固定设备的内部 API 路径。
+     * @returns {string} 原私网 URL，或带明确服务前缀的公网 HTTPS URL。
+     */
+    function deviceRequestUrl(path) {
+        if (path.indexOf("/api/devices/" + config.device_id + "/") !== 0)
+            throw new Error("设备请求路径无效");
+        // 公网路径不重复保留 /api；Nginx 将该前缀映射回后端 /api。
+        return config.base_url + (publicDeviceApi ? path.slice(4) : path);
+    }
 
     /** 每轮显式检查中断与本引擎停止标记，避免长轮询和宽泛异常处理吞掉停止请求。 */
     function stopRequested() {
@@ -35,7 +67,7 @@
      * @returns {Object|null} JSON 响应；204 返回 null。
      */
     function request(method, path, body, shortRequest) {
-        var connection = new java.net.URL(config.base_url + path).openConnection();
+        var connection = new java.net.URL(deviceRequestUrl(path)).openConnection();
         var input = null;
         try {
             connection.setRequestMethod(method);
@@ -159,9 +191,8 @@
 
     try {
         config = JSON.parse(files.read(files.join(folder, "remote-config.local.json")).replace(/^\uFEFF/, ""));
-        config.base_url = String(config.base_url || "").replace(/\/+$/, "");
-        if (!/^https?:\/\/[^\s/?#]+(?::\d+)?$/.test(config.base_url) || config.base_url.indexOf("@") >= 0
-            || !/^[A-Za-z0-9_-]{1,64}$/.test(String(config.device_id))
+        config.base_url = configureEndpoint(config.base_url);
+        if (!/^[A-Za-z0-9_-]{1,64}$/.test(String(config.device_id))
             || typeof config.device_key !== "string" || config.device_key.length < 32 || config.device_key.length > 512) {
             throw new Error("远程连接配置无效");
         }

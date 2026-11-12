@@ -22,6 +22,26 @@
 
 网关配置参考 [OpenAPI 示例](../deploy/gateway-office.openapi.yaml) 或 [HTTP 示例](../deploy/gateway-office.http.yaml)，二选一合并到已有服务。网关与后端同机时使用回环地址；凭据从网关自己的私密环境中读取。保留已有认证设置，不用示例整体覆盖线上配置。
 
+## 手机公网 HTTPS 设备入口
+
+手机的公网 `base_url` 使用 `https://mcp.example.com/office_mcp_device_api`。手机仅需普通互联网；本方案不部署办公电脑领取端，不依赖手机 ZeroTier。Nginx 复用现有公网 HTTPS 入口和证书，直接代理设备接口到同机 `office-mcp`，保留现有 MCP 路由及认证。
+
+1. 将 [Nginx 设备路由片段](../deploy/nginx/office_mcp_device_api.locations.conf) 放入服务器 snippets 目录。在当前 HTTPS `server {}` 内增加以下 include，不要将此片段当成独立 server 配置，也不要覆盖既有站点：
+
+   ```nginx
+   include /etc/nginx/snippets/office_mcp_device_api.locations.conf;
+   ```
+
+2. 核对片段中的 `127.0.0.1:18101` 是实际内部后端地址。默认片段只代理六类设备路径和指定方法：领取、回执、探测应答、执行补报、自动开关同步、任务查询；未知路径返回 404，错误方法返回 405。不代理办公 API、员工查询、OpenAPI 或 healthz。父级不能用 `^~` 前缀遮蔽片段中的正则白名单。
+3. 设备继续由 `office-mcp` 校验 `X-Device-Id` 和 `X-Device-Key`，Nginx 不注入身份，并清除不属于设备通道的 `Authorization`／`X-Api-Key` 上游头。不要把网关 OAuth、网关静态密钥或办公 API Key 填入手机，不把密钥加入 URL／访问日志。更换设备密钥时同步更新私密设备配置并重启后端，再更新手机配置；不要改动其他设备登记。
+4. 先执行 `nginx -t`，确认现有配置通过后再 reload。长轮询等待原上限 25 秒，片段读取超时 40 秒，关闭缓冲、缓存及代理自动重试。HTTPS 证书必须被手机系统信任；不关闭证书或主机名校验，不依赖 HTTP 重定向升级。
+5. 备份手机原 `remote-config.local.json` 和接收器。没有活动打卡时合作停止唯一接收器，更新 `office_remote_listener.js`，只修改配置中的 `base_url`，保留设备密钥、动作参数、定时任务、Task 去重、自动开关及收尾状态，再启动唯一接收器。已有后端无需更改业务代码或设备协议。
+6. 上线后只读调用 `attendance_device_status` 验证真实往返，查询原开关确认状态未变。检查不带凭据的设备请求被拒绝、其他业务路径不被此入口代理。不通过启动钉钉、设置开关或切断用户网络验收。
+
+原无路径 ZeroTier／内部 HTTP 配置继续兼容；恢复时仅还原手机连接地址或接收器，保留当前状态，不恢复历史 Task／计划快照。服务入口和网关工具名、参数未改变，无需为本功能新增 MCP 工具或调整网关白名单。完整约定见 [开发目标](device-public-https-prd.md)。
+
+隔离代理检查可在有 Nginx 的 Linux 环境执行 `python3 tests/nginx/device-api-proxy.test.py`；测试只启动回环临时端口上的独立进程和合成上游，不加载或 reload 线上 Nginx。该测试验证代理路由和转发，真实手机 TLS 联通留在上线验收。
+
 ## 设备实时在线探测升级
 
 更新后端并在网关加入 `attendance_device_status`，刷新 OpenAPI；手机仅需更新 `office_remote_listener.js` 并安全停止旧实例、启动唯一新版接收器。保留配置、定时任务、全部 Task、自动开关和手机持久化状态。正在执行打卡时先等待完成，不通过手动运行定时入口验收。

@@ -39,6 +39,14 @@ flowchart TD
 
 MCP 接口由网关提供，手机通过 HTTP 主动领取命令，不需要开放监听端口。本地定时动作独立运行；上午随机子任务执行后也会由常驻接收器上报，进入同一套 Task 核验。断网或接收器停止时，定时脚本沿用手机最后保存的自动打卡开关：开启则按原窗口执行，关闭则跳过。事实保留在手机等待当天恢复补报；开关同步、上报和结果回写需要常驻接收器运行。
 
+## 手机通过 Wi-Fi 和公网 HTTPS 独立运行
+
+先在服务器现有 HTTPS 站点配置 [设备专用路由](../docs/deployment.md#手机公网-https-设备入口)，再将同目录 `remote-config.local.json` 的 `base_url` 改为 `https://mcp.example.com/office_mcp_device_api`，填写本机已配对的设备 ID 和密钥，重启唯一 `office_remote_listener.js`。运行期间只需手机可联网及云端服务可用，无需办公电脑、ADB、scrcpy 或手机 ZeroTier。
+
+接收器统一将内部 `/api/devices/...` 转换为公网 `/office_mcp_device_api/devices/...`。领取、远程回执、本地补报、自动开关同步、任务结果查询和探测应答全部走该入口，其他模块和手机状态格式无需迁移。
+
+新公网地址必须使用 HTTPS，保留系统证书校验、不接受重定向，不自动回落 HTTP。地址不能带用户名密码、查询参数、片段或其他路径。原 `http://192.0.2.10:18101` 等无路径根地址仍按原 `/api/devices/...` 协议工作；同一实例只连接所配置入口，不新增第二个领取循环。设备凭据只通过原 `X-Device-Id`、`X-Device-Key` 请求头传输，不使用网关 OAuth 或办公 API Key。
+
 ## 远程开关被动自动打卡
 
 请假前调用 `attendance_automation_set`，显式传入 `enabled: false`；返岗前以新的 `request_id` 调用 `enabled: true`。`request_id` 为带连字符的 UUID，同一次设置重试必须复用；本接口没有容易因重试翻转状态的 toggle 操作。`wait_seconds` 默认 45，允许 0～60 秒。
@@ -156,7 +164,7 @@ VERIFY_RESULT：task_id=<Task UUID>，state=succeeded，attendance_confirmed=tru
 
 接收器每轮检查线程中断及本引擎的 `office_mcp.listener.stop` 标记。发布辅助可给目标引擎设置停止标记，等待现有短请求／长轮询返回后退出；已领取但尚未执行的命令保存不确定回执，不在重启后补做动作。必须确认旧实例已经退出，再启动新实例。
 
-1. **领取命令。** 从同目录配置读取服务地址、设备 ID 和密钥，以 `X-Device-Id`、`X-Device-Key` 认证。向 `POST /api/devices/{device_id}/commands/lease` 长轮询，每轮最多等待 25 秒；无命令则继续下一轮，连接失败按 2、4、8、16、30 秒退避重连。
+1. **领取命令。** 从同目录配置读取服务地址、设备 ID 和密钥，以 `X-Device-Id`、`X-Device-Key` 认证。内部协议为 `POST /api/devices/{device_id}/commands/lease`，公网配置统一映射到 `/office_mcp_device_api/devices/{device_id}/commands/lease`。每轮最多等待 25 秒；无命令则继续下一轮，连接失败按 2、4、8、16、30 秒退避重连。
 2. **持久化去重。** 使用 `office-mcp.remote.v1.<设备ID>` 存储。已存在 `done_<任务ID>` 时只准备重传原回执。新命令在动作前先保存结果为“不确定”的执行标记和 `pending_receipt`，避免动作发生后因中断而被盲目重做。
 3. **换算有效期。** 使用 `expires_at_unix_ms - server_time_unix_ms` 计算剩余时间，再设置手机截止时间为 `Date.now() + 剩余时间 - 2000`，预留 2 秒传输余量。剩余时间必须有限、大于 2 秒且不超过 10 分钟，否则拒绝动作。远程命令遵守自己的有效期，不使用定时入口的上午窗口。
 4. **执行并回执。** 调用共用动作模块，把动作结果和 `lease_token` 持久化，再向 `POST /api/devices/{device_id}/commands/{task_id}/report` 上报。临时失败时每 5 秒只重传回执，优先处理完回执再领取新命令；403、404 则清理待发送回执，避免一直阻塞。
@@ -209,7 +217,7 @@ Agent 通过 `attendance_clock_in` 创建远程任务，同一操作重试复用
 
 ```json
 {
-  "base_url": "http://192.0.2.10:18101",
+  "base_url": "https://mcp.example.com/office_mcp_device_api",
   "device_id": "office-phone",
   "device_key": "替换为已配对的设备密钥",
   "keep_screen_on_seconds": 15,
@@ -217,7 +225,7 @@ Agent 通过 `attendance_clock_in` 创建远程任务，同一操作重试复用
 }
 ```
 
-`device_key` 对应服务端设备凭据，不使用网关 API Key 或钉钉应用密钥。示例中的 192.0.2.10 是文档占位地址，需改为手机经 ZeroTier 等私有网络可访问的实际服务地址；远程保亮参数允许 0～30 秒，打开前等待允许 0～10000ms。
+`device_key` 对应服务端设备凭据，不使用网关 API Key 或钉钉应用密钥。示例中的 `mcp.example.com` 为占位域名，需改为已配置设备路由及有效 HTTPS 证书的真实域名。公网入口部署前保留原私网地址，不要只改手机导致暂时无法连接。远程保亮参数允许 0～30 秒，打开前等待允许 0～10000ms。
 
 启用远程功能、本地核验、远程开关和桌面收尾时运行一次 `office_remote_listener.js` 并保持常驻，共用时间、动作、队列、控制和收尾模块不需要单独运行。后端需支持现有设备 Task 查询、本地上报及开关同步接口；本次返回桌面没有新增后端接口。将包括 `office_time.js` 的七个 `.js` 文件更新到实际入口目录，保留配置、已登记计划和 `.office-mcp`；确认原定时入口没有正在执行，停止旧接收器后更新并启动新版，已运行实例不会热更新。新增模块应先于依赖它的入口更新。不得通过手动运行定时入口来验收网络链路，以免触发设备动作。设备需具备无需人工解锁即可打开钉钉的条件，并保持 AutoJs6、ZeroTier 和钉钉所需的后台及网络能力。
 
