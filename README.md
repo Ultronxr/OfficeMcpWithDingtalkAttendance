@@ -1,6 +1,6 @@
 # Office HTTP API
 
-通用办公 HTTP 服务，目标框架 `net8.0`，提供钉钉考勤查询、按打卡时间筛选的加班统计及手机远程打卡。可在 Linux 上由 systemd 托管，也可在 Windows 本地运行。[架构与接口约定](docs/architecture.md)说明了模块边界。
+通用办公 HTTP 服务，目标框架 `net8.0`，提供钉钉考勤查询、按打卡时间筛选的加班统计及手机远程打卡。服务端与 `mcp-gateway` 部署在同一台 Linux 云服务器，由 systemd 托管；手机通过公网 HTTPS 独立通信。开发电脑用于维护源码、构建和测试，不参与打卡运行链路。[架构与接口约定](docs/architecture.md)说明了模块边界。
 
 AutoJs6 远程打卡与上午本地定时打卡共用持久化 Task 和钉钉 API 核验。定时动作后由常驻接收器上报执行事实、取回结果并写入手机日志，断网只补传事实，不重做动作。手机部署见 [定时与远程打卡说明](autojs6/README.md)，当前部署和运维见 [部署说明](docs/deployment.md)。
 
@@ -116,10 +116,10 @@ X-Api-Key: <本服务的 API Key>
 ## 部署方式
 
 - Linux 示例服务目录为 `/opt/office-mcp`，服务名为 `office-mcp.service`，按实际环境调整。
-- gateway 与后端同机时，通过 `127.0.0.1:18101` 访问后端。
-- 手机推荐通过 `/office_mcp_device_api/` 公网 HTTPS 入口访问设备接口，原 ZeroTier 私网入口保留兼容；文中的 `192.0.2.10`、`mcp.example.com` 均为占位地址，使用前必须替换。
+- gateway、Nginx 与后端同机，通过 `127.0.0.1:18101` 访问后端，不需要把该业务端口直接暴露到公网。
+- 手机通过 `/office_mcp_device_api/` 公网 HTTPS 入口访问设备接口；`mcp.example.com` 为占位域名，使用前必须替换。原私网地址仅保留协议兼容，不是现行部署的前置条件。
 - 使用 `scripts/publish-linux.ps1` 发布 Linux 自包含程序；升级保留 `appsettings.Local.json` 和 `data/device-commands`。
-- 下方 NSSM 操作适用于选择 Windows 部署的环境。
+- 服务账号只需读取程序和私密配置、读写状态目录；默认状态目录包含打卡任务、去重记录、锁文件及 `automation/state.json` 开关状态。
 
 ## 本地启动
 
@@ -315,64 +315,57 @@ ConvertTo-Json -InputObject $officeResult -Depth 6
 
 当 `complete=true` 且 `days=[]` 时，表示范围内没有满足规则或待核验的出勤日期。考勤／所需分类查询失败时 `complete=false`，`errors` 逐日说明安全错误；分类未知仍返回已有记录。`summary.overtime_days` 包括确有非工作日打卡的缺卡日期，`returned_days` 包括待核验候选；`unconfirmed_days` 和 `duration_unconfirmed_days` 分别说明未确认加班与已确认但缺时长的天数。总时长仅合计已确认且能核算的部分，必须同时检查 `duration_complete`。缺卡可以使时长不完整而查询仍完整，不能将 `complete=true` 等同于时长齐全。HTTP 鉴权、参数和姓名解析错误沿用原考勤接口。
 
-## 发布与 NSSM
+## Linux 发布与服务运维
 
-构建需要支持 net8.0 的 .NET SDK，发布程序需要 Windows x64 上安装 ASP.NET Core 8 运行时。
+在开发环境使用能构建 `net8.0` 的 .NET SDK 和 PowerShell 执行发布脚本；产物携带 Linux x64 运行时，服务器不需要另行安装 SDK 或共享运行时。
 
-```powershell
-# 生成 artifacts/publish 下的可执行文件及依赖。
-./scripts/publish.ps1
-
-# 首次安装时复制本机配置；升级时保留发布目录已有的配置。
-Copy-Item ./src/OfficeMcp.Api/appsettings.Local.json ./artifacts/publish/appsettings.Local.json
-```
-
-网关通过 ZeroTier 接入前，在发布目录的 `appsettings.Local.json` 增加监听配置：
-
-```json
-"Urls": "http://127.0.0.1:18101;http://192.0.2.10:18101"
-```
-
-`192.0.2.10` 仅为文档示例，必须替换为本机实际的 ZeroTier 地址。确保监听地址存在，并按需配置防火墙，仅允许网关和已配对手机的私有网络地址访问该端口。
-
-使用管理员 PowerShell 注册并启动：
+当前项目仍为 `net8.0`，发布脚本默认携带运行时 `8.0.31`。.NET 8 已于 2026-11-10 结束支持，详见 [.NET 官方支持策略](https://dotnet.microsoft.com/en-us/platform/support/policy/dotnet-core)。框架升级需要同步项目、发布脚本和回归验证，不能仅修改文档中的版本号。
 
 ```powershell
-./scripts/install-nssm.ps1 -StartNow
+# 生成 artifacts/publish-linux-x64 下的自包含程序，不包含私密配置或业务状态。
+./scripts/publish-linux.ps1
 ```
 
-脚本默认使用相邻的 `nssm-2.24/win64/nssm.exe`，也支持 `-NssmPath`、`-PublishDirectory`、`-ServiceName`。设置开机自启、异常重启和 10 MiB 日志轮转。日志位于发布目录的 `logs`。默认仅注册，传 `-StartNow` 才立即启动。
+首次部署按 [Linux 后端步骤](docs/deployment.md#linux-后端)配置独立服务账号、私密配置及 [systemd 服务模板](deploy/linux/office-mcp.service)。按实际安装目录调整服务模板，启动前创建并授权 `data` 状态目录；手机独立设备入口另外按 [Nginx 部署步骤](docs/deployment.md#手机公网-https-设备入口)配置。
 
-也可通过 NSSM GUI 配置：
+升级前备份既有程序、私密配置和状态目录，再停止云端后端：
 
-| 字段 | 值 |
-|---|---|
-| Path | 发布目录下 `OfficeMcp.Api.exe` 的绝对路径 |
-| Startup directory | 发布目录的绝对路径 |
-| Arguments | 留空 |
-| Environment | `ASPNETCORE_ENVIRONMENT=Production` |
-
-升级前先停止 `OfficeMcp` 服务，发布完成后再启动。不要在服务占用文件时变更构建目录。服务账号须能读取发布目录中的配置、写入 `logs`；按需要在 NSSM 的 Log on 页选择运行账号。
-
-```powershell
-Stop-Service OfficeMcp
-./scripts/publish.ps1
-Start-Service OfficeMcp
-Invoke-RestMethod http://127.0.0.1:18101/healthz
+```bash
+sudo systemctl stop office-mcp.service
 ```
 
-## 后续接入 mcp-gateway
+用新发布产物替换程序，保留已有 `appsettings.Local.json` 和完整的 `data/device-commands`，不要用示例配置或空状态目录覆盖。随后启动服务并检查：
+
+```bash
+sudo systemctl start office-mcp.service
+sudo systemctl status office-mcp.service --no-pager
+curl --fail --silent --show-error http://127.0.0.1:18101/healthz
+sudo journalctl -u office-mcp.service -n 50 --no-pager
+```
+
+服务日志由 systemd journal 收集。`/healthz` 只证明进程存活；手机通信使用只读 `attendance_device_status` 验证，不能用真实打卡或切换自动开关代替部署检查。
+
+## 接入 mcp-gateway
 
 准备了两种匹配现有网关实现的配置，二选一：
 
-- `deploy/gateway-office.openapi.yaml`：从受保护的 `/openapi/v1.json` 导入考勤、加班、员工、主动打卡与 Task 查询、自动打卡开关与状态查询，共七个操作。
+- `deploy/gateway-office.openapi.yaml`：从受保护的 `/openapi/v1.json` 按白名单导入工具。
 - `deploy/gateway-office.http.yaml`：手工描述 HTTP 工具，网关启动时无需读取本服务文档。
+
+两份示例包含相同的八个工具：
+
+| 用途 | 工具 |
+|---|---|
+| 考勤、加班和员工查询 | `attendance_query`、`attendance_overtime`、`employee_list` |
+| 主动打卡和任务状态 | `attendance_clock_in`、`attendance_clock_in_status` |
+| 自动打卡开关和生效状态 | `attendance_automation_set`、`attendance_automation_status` |
+| 设备实时在线探测 | `attendance_device_status` |
 
 将示例服务项合并到自己的 mcp-gateway 配置中，例如 `/opt/mcp-gateway/config/gateway.yaml`，并在网关私密环境配置 `OFFICE_API_KEY`，值与本服务的 `Authentication:ApiKey` 相同。随后重启网关并刷新客户端工具列表。MCP 地址示例为 `https://mcp.example.com/office_common_tools/mcp`，需替换为实际域名；工具名保留后端原名，`attendance_query` 的必填参数为 `start_date` 和 `end_date`，返回按日组织的数组。
 
-升级已有接入时，OpenAPI 方式需要让网关重新读取在线服务文档，并将 `attendance_overtime` 加入既有白名单（尚未接入员工工具时同时加入 `employee_list`）；手工 HTTP 方式需同步工具定义。两份网关示例的 HTTP 超时为 150 秒，高于服务默认的 120 秒整次查询限制。如调整服务超时或日期上限，请同步更新网关配置和工具说明。此处配置示例不会自动修改线上网关。
+升级已有接入时，OpenAPI 方式需要重新读取服务文档，并将既有 `include_operations` 与示例中的完整工具清单对齐；手工 HTTP 方式同步工具定义。保留现有认证与其他后端配置，不要整体覆盖网关。两份示例的 HTTP 超时为 150 秒，高于服务默认的 120 秒整次查询限制；如调整服务超时或日期上限，应同步更新网关配置和工具说明。
 
-远程打卡为 `attendance_clock_in`（POST）与 `attendance_clock_in_status`（GET）；仍使用配置的固定员工，通过 `/topapi/attendance/getupdatedata` 核验，不随动态查询员工改变。其启用、设备配对和调用语义见远程打卡说明。网关使用 `methods: [GET, POST]`，`include_operations` 包含这两个 operationId、`attendance_query`、`attendance_overtime`、`employee_list`、`attendance_automation_set` 和 `attendance_automation_status`，共七个工具。仅发布办公服务或刷新客户端不会修改旧白名单。设备领取／回执／开关同步接口使用独立认证，不作为 Agent 工具导入。
+主动打卡仍使用配置的固定员工，通过 `/topapi/attendance/getupdatedata` 核验，不随动态查询员工改变；其启用、设备配对和调用语义见 [手机说明](autojs6/README.md)。OpenAPI 示例同时允许 GET 和 POST。仅发布办公服务或刷新客户端不会修改网关旧白名单；设备 API 使用独立认证，不作为 Agent 工具导入。
 
 ## 验证
 
@@ -380,7 +373,21 @@ Invoke-RestMethod http://127.0.0.1:18101/healthz
 dotnet test OfficeMcp.sln -c Release -m:1
 ```
 
-测试使用合成用户和内存 HTTP 替身覆盖认证、日期范围边界、七天分段、OpenAPI 契约、完整明细、部分失败、整体超时、部门递归与员工分页、重名选择、目录缓存、令牌缓存、失效重试，以及加班门槛、配置覆盖、多次下班、跨午夜、精确时长与失败隔离，不访问真实钉钉接口。
+后端测试使用合成用户和内存 HTTP 替身覆盖办公／设备认证隔离、实时探测、开关确认、Task、查询契约、时间格式、加班规则及上游失败，不访问真实钉钉接口。
+
+手机脚本测试在安装 Node.js 的开发环境执行，使用内存网络、设备动作和存储替身：
+
+```powershell
+node --test tests/autojs6/remote-listener.test.cjs tests/autojs6/time.test.cjs tests/autojs6/window-scheduling.test.cjs
+```
+
+在安装 Nginx 和 Python 3 的 Linux 环境验证真实代理片段：
+
+```bash
+python3 tests/nginx/device-api-proxy.test.py
+```
+
+代理测试只启动临时回环端口上的独立 Nginx 和合成上游，覆盖路径白名单、方法、认证头转发及超过 25 秒的长轮询，不加载或 reload 现有 Nginx，也不连接真实手机。
 
 ## 私密配置
 

@@ -4,15 +4,14 @@
 
 ```mermaid
 flowchart LR
-    A[外部 AI 客户端] -->|MCP / OAuth| G[mcp-gateway]
-    G -->|本机 HTTP / X-Api-Key| H[服务器 OfficeMcp.Api]
-    P[手机 AutoJs6] -->|HTTPS /office_mcp_device_api/| N[Nginx 设备路由白名单]
-    N -->|内部 HTTP / 独立设备密钥| H
-    P -.兼容旧 ZeroTier 配置.-> H
-    H --> C[考勤功能]
-    H -.后续添加.-> F[其他办公功能]
+    A["外部 AI 客户端"] -->|"HTTPS / MCP"| E["Cloudflare"]
+    P["手机 AutoJs6"] -->|"HTTPS / 设备 API"| E
+    E --> N["云端 Nginx"]
+    N -->|"MCP 入口 / OAuth 或 Bearer"| G["mcp-gateway"]
+    G -->|"本机 HTTP / X-Api-Key"| H["云端 OfficeMcp.Api"]
+    N -->|"设备路由白名单 / 独立设备密钥"| H
+    H --> C[考勤与员工功能]
     C --> D[共享钉钉客户端与令牌缓存]
-    F -.按需复用.-> D
     D -->|HTTPS| O[钉钉官方 API]
 ```
 
@@ -45,7 +44,7 @@ flowchart LR
 - 未打卡时间返回 `null`；仅当 `success: true` 时，空记录表示钉钉没有返回结果，不能推断成旷工或休息。
 - 未识别状态返回“未知状态”，同时保留原始码。
 - 全项目必须遵守 [时间规范](time-conventions.md)：HTTP、完整明细、日志和新产生的状态日期时间共用 `OfficeTime`，手机使用 `office_time.js`；对外显示到秒并带 `+08:00`，内部状态保留原精度，不输出 `time_zone`。钉钉无偏移时间按北京时间解析；设备 Unix 毫秒协议与时长不平移。
-- `GET /openapi/v1.json` 提供文档，查询 operationId 为 `attendance_query`、`employee_list`。文档和业务均要求 `X-Api-Key`。
+- `GET /openapi/v1.json` 提供八个办公工具的文档：考勤、加班、员工、主动打卡、Task 查询、自动开关设置与状态、实时在线探测。operationId 与两份网关示例一致；文档和办公业务均要求 `X-Api-Key`，设备 API 使用独立认证且不导入网关工具。
 - `GET /healthz` 匿名，仅表示宿主进程存活，不调用钉钉，也不证明外部 API 可用。
 - `GET /api/attendance/device-status` 对应 `attendance_device_status`，通过 `DeviceProbeService` 创建独立内存挑战，复用设备领取通道和独立应答路由验证一次往返。只确认本次应答，不使用 60 秒历史连接标记；不创建任务或修改开关。`wait_seconds` 默认 10、范围 1～30；超时返回 `online=false/status=probe_timeout`，不推断故障原因。两个自动开关接口仅返回设置与版本确认，不返回 `device_online`，也不隐式调用探测；Task 的旧在线字段保留。详见 [实时探测约定](device-online-probe-prd.md)。
 
@@ -67,4 +66,3 @@ flowchart LR
 - [阿里官方 API 字段与示例](https://developer.alibaba.com/docs/api.htm?apiId=37307)
 - [钉钉企业内部应用令牌](https://open.dingtalk.com/document/orgapp/obtain-orgapp-token)
 - [ASP.NET Core HTTP 请求](https://learn.microsoft.com/aspnet/core/fundamentals/http-requests?view=aspnetcore-8.0)
-- [NSSM 使用说明](https://www.nssm.cc/usage)

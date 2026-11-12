@@ -1,13 +1,13 @@
 # 部署说明
 
-仓库提供通用配置，真实钉钉用户、应用凭据、API Key、设备密钥和网络地址由部署环境填写。`appsettings.Local.json`、`remote-config.local.json`、HTTP 客户端私密环境和实际部署记录不提交到 Git。
+服务端与 `mcp-gateway` 部署在同一台 Linux 云服务器，手机通过公网 HTTPS 设备入口独立通信。开发电脑只负责源码、构建和测试，不承载打卡服务。仓库提供通用配置，真实钉钉用户、应用凭据、API Key、设备密钥和网络地址由部署环境填写。`appsettings.Local.json`、`remote-config.local.json`、HTTP 客户端私密环境和实际部署记录不提交到 Git，真实地址、账号路径及运维记录不写入公开示例。
 
 ## Linux 后端
 
 1. 在开发环境执行 `scripts/publish-linux.ps1`，生成 `artifacts/publish-linux-x64` 下的自包含程序。脚本只发布，不上传或重启服务。
 2. 将产物放入服务目录，示例使用 `/opt/office-mcp`。复制 `deploy/linux/appsettings.Local.example.json` 为该目录中的 `appsettings.Local.json`，填写 API Key、钉钉 ClientId / ClientSecret、固定 Attendance.UserId 和设备凭据。
-3. 按实际网络配置 `Urls`：同机网关可用 `http://127.0.0.1:18101`；手机通过 ZeroTier 等私有网络访问时，还需监听服务器实际的私有网络地址，并限制访问来源。
-4. 创建独立服务账号 `office-mcp`，确保其可以读取程序和配置、写入 `data`。配置文件仅允许必要账号读取，任务数据不要放在公开目录。
+3. 现行部署使用 `Urls=http://127.0.0.1:18101`，由同机网关和 Nginx 访问后端；手机通过下方公网设备入口连接，不直接公开后端端口。只有保留旧私网连接时才增加私网监听并限制来源。
+4. 创建独立服务账号 `office-mcp`，确保其可以读取程序和配置；启动前创建 `data` 并授予读写权限，供默认任务目录、开关状态及独占锁使用。自定义 `RemoteDevices:StateDirectory` 时同步调整目录授权和服务模板的 `ReadWritePaths`。配置文件仅允许必要账号读取，任务数据不要放在公开目录。
 5. 按实际安装目录修改 `deploy/linux/office-mcp.service` 的 `WorkingDirectory`、`ExecStart` 和 `ReadWritePaths`，再交由 systemd 管理。
 
 升级前停止服务，替换程序时保留已有 `appsettings.Local.json` 和 `data/device-commands`，再启动服务。同一状态目录只允许一个后端实例使用。`/healthz` 仅验证进程存活，不证明钉钉接口或手机在线。
@@ -20,7 +20,7 @@
 
 手机部署和任务逻辑见 [AutoJs6 说明](../autojs6/README.md)。将 `remote-config.example.json` 复制为同目录的 `remote-config.local.json`，使用手机可访问的真实服务地址和已配对的设备密钥。
 
-网关配置参考 [OpenAPI 示例](../deploy/gateway-office.openapi.yaml) 或 [HTTP 示例](../deploy/gateway-office.http.yaml)，二选一合并到已有服务。网关与后端同机时使用回环地址；凭据从网关自己的私密环境中读取。保留已有认证设置，不用示例整体覆盖线上配置。
+网关配置参考 [OpenAPI 示例](../deploy/gateway-office.openapi.yaml) 或 [HTTP 示例](../deploy/gateway-office.http.yaml)，二选一合并到已有服务。两份示例均包含八个工具，包括 `attendance_device_status`。网关与后端使用同机回环地址；凭据从网关自己的私密环境中读取。保留已有认证设置，不用示例整体覆盖线上配置。
 
 ## 手机公网 HTTPS 设备入口
 
@@ -59,12 +59,6 @@
 ## 非工作日加班查询升级
 
 本次更新后端并刷新网关 OpenAPI／工具说明，工具名及五个参数保持不变。部署前确认原生 `getattcolumns` 和 `getcolumnval` 在当前应用下可读；部署后只读验证历史工作日、休息日白天完整卡及缺卡日期。确认 `day_type`、`anomalies`、nullable 时长和 `summary.duration_complete` 已在工具定义与真实响应中生效。仅检查 healthz 不足以确认该功能可用。保留配置、自动开关和所有 Task 数据，手机脚本不参与此次查询能力升级。
-
-## Windows 可选部署
-
-`scripts/publish.ps1` 生成 Windows 发布程序，`scripts/install-nssm.ps1` 可注册服务；需要目标主机具备相应 ASP.NET Core 运行时。NSSM 路径、发布目录和服务名可通过脚本参数指定，具体示例见 [项目 README](../README.md)。
-
-不同主机的真实地址、账号路径和运维记录留在本地配置或私有运维文档中，不写入公开示例。
 
 ## 时间规范升级
 
